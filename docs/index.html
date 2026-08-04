@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chronos — Distributed Job &amp; Webhook Scheduler</title>
+<meta name="description" content="A multi-worker webhook scheduler with at-least-once delivery, lease-based crash recovery and p99 scheduling drift of 236ms. Java 21, Spring Boot, MongoDB.">
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --line:#30363d; --ink:#e6edf3; --dim:#8b949e;
+    --accent:#58a6ff; --good:#3fb950; --warn:#d29922; --bad:#f85149; --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+       -webkit-font-smoothing:antialiased}
+  .wrap{max-width:900px;margin:0 auto;padding:0 24px}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono);font-size:.88em;background:#1f2630;padding:.15em .4em;border-radius:4px}
+  pre{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px;overflow-x:auto}
+  pre code{background:none;padding:0}
+  h2{font-size:1.5rem;margin:56px 0 8px;letter-spacing:-.01em}
+  h3{font-size:1.06rem;margin:32px 0 6px;color:var(--ink)}
+  p{color:#c9d1d9}
+  .lede{color:var(--dim)}
+
+  header{border-bottom:1px solid var(--line);padding:64px 0 40px;background:
+    radial-gradient(900px 300px at 50% -80px, rgba(88,166,255,.10), transparent 70%)}
+  h1{font-size:2.6rem;margin:0 0 6px;letter-spacing:-.03em}
+  .tag{color:var(--dim);font-size:1.06rem;margin:0 0 22px}
+  .stack{font-family:var(--mono);font-size:.8rem;color:var(--dim);letter-spacing:.02em}
+  .cta{margin-top:26px;display:flex;gap:10px;flex-wrap:wrap}
+  .btn{border:1px solid var(--line);background:var(--panel);color:var(--ink);
+       padding:9px 16px;border-radius:7px;font-size:.9rem;display:inline-block}
+  .btn:hover{border-color:var(--accent);text-decoration:none}
+  .btn.primary{background:#1f6feb;border-color:#1f6feb;color:#fff}
+
+  .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin:34px 0 0}
+  .metric{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:16px}
+  .metric b{display:block;font-size:1.72rem;letter-spacing:-.02em;color:var(--good);font-family:var(--mono)}
+  .metric span{display:block;color:var(--dim);font-size:.76rem;margin-top:4px;line-height:1.45}
+
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:.9rem;display:block;overflow-x:auto}
+  th,td{border:1px solid var(--line);padding:8px 11px;text-align:left;white-space:nowrap}
+  th{background:var(--panel);font-weight:600;color:var(--dim);font-size:.8rem;
+     text-transform:uppercase;letter-spacing:.04em}
+  td.num{font-family:var(--mono)}
+  .win{color:var(--good);font-weight:600}
+  .lose{color:var(--bad)}
+
+  .note{border-left:3px solid var(--accent);background:rgba(88,166,255,.06);
+        padding:13px 17px;margin:18px 0;border-radius:0 7px 7px 0}
+  .note.amber{border-color:var(--warn);background:rgba(210,153,34,.07)}
+  .note p{margin:0;color:#c9d1d9;font-size:.94rem}
+  .note p+p{margin-top:9px}
+
+  figure{margin:22px 0}
+  figure img{width:100%;border:1px solid var(--line);border-radius:9px;display:block}
+  figcaption{color:var(--dim);font-size:.8rem;margin-top:8px;text-align:center}
+  svg{width:100%;height:auto}
+
+  footer{border-top:1px solid var(--line);margin-top:72px;padding:28px 0 56px;
+         color:var(--dim);font-size:.85rem}
+  @media(max-width:600px){h1{font-size:1.95rem}h2{font-size:1.28rem}}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <h1>Chronos</h1>
+    <p class="tag">A distributed job &amp; webhook scheduler — delivers HTTP webhooks at a precise
+       time across many workers, survives losing them mid-run, and proves it.</p>
+    <p class="stack">JAVA 21 · SPRING BOOT 4.1 · MONGODB 7 · DOCKER · PROMETHEUS + GRAFANA</p>
+
+    <div class="metrics">
+      <div class="metric"><b>236ms</b><span>p99 scheduling drift across 3 workers</span></div>
+      <div class="metric"><b>zero</b><span>jobs lost with 2 of 5 workers killed mid-run</span></div>
+      <div class="metric"><b>99.2%</b><span>faster claim query after index reordering</span></div>
+      <div class="metric"><b>164</b><span>tests, incl. 1,000 jobs × 10 workers</span></div>
+    </div>
+
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/Pranay847/chronos-scheduler">View source on GitHub</a>
+      <a class="btn" href="https://github.com/Pranay847/chronos-scheduler/blob/main/BENCHMARKS.md">Benchmarks</a>
+      <a class="btn" href="https://github.com/Pranay847/chronos-scheduler/blob/main/CHAOS.md">Chaos test</a>
+      <a class="btn" href="https://github.com/Pranay847/chronos-scheduler/tree/main/docs/adr">Design decisions</a>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+<h2>The problem</h2>
+<p>Run this job at 09:00 on Tuesday. Send it as an HTTP webhook. Now run several copies of the
+service so it survives a machine dying — without any of them firing the same job twice, and without
+losing a job when one is killed mid-delivery.</p>
+
+<h2>How it works</h2>
+<p class="lede">Every worker is identical. There is no leader, no queue, and no lock service.</p>
+
+<svg viewBox="0 0 760 300" role="img" aria-label="Architecture diagram">
+  <defs>
+    <marker id="a" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#8b949e"/>
+    </marker>
+    <style>
+      .b{fill:#161b22;stroke:#30363d;rx:8}
+      .t{fill:#e6edf3;font:13px ui-monospace,monospace;text-anchor:middle}
+      .s{fill:#8b949e;font:10.5px ui-monospace,monospace;text-anchor:middle}
+      .l{stroke:#8b949e;stroke-width:1.4;fill:none;marker-end:url(#a)}
+      .hl{stroke:#58a6ff}
+    </style>
+  </defs>
+
+  <rect class="b" x="14" y="122" width="104" height="46"/>
+  <text class="t" x="66" y="150">Client</text>
+
+  <path class="l" d="M122,145 H186"/>
+  <text class="s" x="154" y="137">POST</text>
+
+  <rect class="b" x="190" y="122" width="104" height="46"/>
+  <text class="t" x="242" y="150">REST API</text>
+
+  <path class="l hl" d="M298,145 H366"/>
+  <text class="s" x="332" y="137">w:majority</text>
+
+  <rect class="b" x="370" y="112" width="118" height="66" style="stroke:#58a6ff"/>
+  <text class="t" x="429" y="139">MongoDB</text>
+  <text class="s" x="429" y="158">replica set</text>
+
+  <rect class="b" x="560" y="18" width="176" height="40"/>
+  <text class="t" x="648" y="43">Worker 1</text>
+  <rect class="b" x="560" y="70" width="176" height="40"/>
+  <text class="t" x="648" y="95">Worker 2</text>
+  <rect class="b" x="560" y="122" width="176" height="40"/>
+  <text class="t" x="648" y="147">Worker 3</text>
+
+  <path class="l hl" d="M492,132 C525,132 528,40 556,40"/>
+  <path class="l hl" d="M492,140 C525,140 528,92 556,92"/>
+  <path class="l hl" d="M492,148 C525,148 528,144 556,144"/>
+  <text class="s" x="524" y="182">atomic findAndModify claim</text>
+
+  <rect class="b" x="560" y="212" width="176" height="46"/>
+  <text class="t" x="648" y="232">Customer endpoint</text>
+  <text class="s" x="648" y="249">HMAC + idempotency key</text>
+  <path class="l" d="M648,166 V208"/>
+</svg>
+
+<p>Each worker runs three loops: <b>poll</b> every 200ms for due work, <b>dispatch</b> on virtual
+threads, and <b>reap</b> expired leases every 10 seconds. Coordination is one atomic
+<code>findAndModify</code> — two workers racing the same job, one wins the write, the other's filter
+no longer matches. Scaling is adding containers.</p>
+
+<div class="note">
+  <p><b>The claim is only half of it.</b> An atomic claim stops two workers <i>starting</i> the same
+  job. It does nothing about a slow worker, whose lease expired mid-delivery, <i>finishing</i> one
+  that has since been handed to someone else — and for a recurring job that silently deletes a
+  firing, with no error anywhere.</p>
+  <p>So every terminal write re-checks that the worker still owns the lease. If it doesn't, the
+  result is discarded rather than written. That is the difference between a duplicate delivery
+  (expected, and handled) and a corrupted schedule (silent, and not).</p>
+</div>
+
+<h2>Surviving failure</h2>
+<p>4,000 jobs, 5 workers, two of them <code>SIGKILL</code>ed mid-run while holding 14 claims between
+them. Every assertion below is checked against the <i>receiver's</i> log, not ours — our own records
+are written after delivery, so a worker killed in between would undercount.</p>
+
+<table>
+  <tr><th>Check</th><th>Result</th></tr>
+  <tr><td>Every job delivered at least once</td><td class="num win">4,000 / 4,000</td></tr>
+  <tr><td>Duplicate deliveries</td><td class="num">2 &nbsp;(0.05%)</td></tr>
+  <tr><td>Jobs fired before their scheduled time</td><td class="num win">0</td></tr>
+  <tr><td>Duplicates with a mismatched identity</td><td class="num win">0</td></tr>
+  <tr><td>Backlog left undelivered</td><td class="num win">0</td></tr>
+</table>
+
+<p>The two duplicates are the system being <i>correct</i>, not leaking. A worker killed after
+sending a request but before recording the result leaves a job whose lease expires and is
+legitimately re-delivered. That is unavoidable over an unreliable network — you cannot tell
+"the receiver processed it and the reply was lost" from "it never arrived."</p>
+
+<p>What makes it safe is that both duplicates carried the <b>same idempotency key</b> as their
+original, so a receiver following the five-line verifier in the README collapses them back to 4,000
+events.</p>
+
+<h2>Measured, not claimed</h2>
+<figure>
+  <img src="grafana-dashboard.png" alt="Grafana dashboard showing scheduling drift percentiles, backlog depth, delivery outcomes and per-worker distribution">
+  <figcaption>Live dashboard — 3 workers, 600 jobs. Drift computed fleet-wide with
+    <code>histogram_quantile</code> over buckets summed across every worker.</figcaption>
+</figure>
+
+<h3>Why 236ms is the right number, not just a good one</h3>
+<p>Polling at interval <i>T</i> gives mean drift <i>T/2</i> and worst case <i>T</i>. At a 200ms
+interval that predicts ~100ms and ~200ms. Measured: <b>106ms</b> and <b>236ms</b>. The design is
+behaving exactly as analysed — which is more informative than a smaller number would be.</p>
+
+<h3>The claim index, at 200,000 jobs</h3>
+<table>
+  <tr><th>Index</th><th>Per query</th><th>Keys examined</th><th>Size</th></tr>
+  <tr><td><code>{status, nextRunAt}</code> — equality before range</td><td class="num win">1.2 ms</td><td class="num">1</td><td class="num">2,136 KB</td></tr>
+  <tr><td><code>{nextRunAt}</code> — naive single-field</td><td class="num lose">161.2 ms</td><td class="num">190,001</td><td class="num">2,132 KB</td></tr>
+  <tr><td><code>{nextRunAt, status}</code> — reversed</td><td class="num lose">160.3 ms</td><td class="num">190,001</td><td class="num">4,496 KB</td></tr>
+  <tr><td>Partial, <code>PENDING</code> only</td><td class="num win">0.9 ms</td><td class="num">1</td><td class="num win">116 KB</td></tr>
+</table>
+
+<p>Compared against a <i>reasonable</i> index rather than against no index at all — beating a
+collection scan only proves indexes exist. The third row is the interesting one: it examines a
+single <i>document</i>, which is the statistic usually quoted, while walking 190,001 index
+<i>keys</i> and taking just as long as the naive version.</p>
+
+<h2>What I got wrong</h2>
+<p class="lede">The parts worth reading, because each was caught by something specific.</p>
+
+<div class="note amber">
+  <p><b>Two benchmarks measured nothing, and both looked fine.</b> The first index comparison used a
+  collection where every job was pending — under which every index performs identically. The first
+  change-stream comparison reported a 60% improvement that was pure run-to-run variance, because the
+  feature's trigger window was too narrow for it to have fired even once.</p>
+  <p>A counter recording how often the optimisation actually ran is the only reason that fabricated
+  number didn't end up on a résumé. A latency feature that silently stops working has no other
+  symptom — nothing errors, and the jobs still fire.</p>
+</div>
+
+<div class="note amber">
+  <p><b>Three platform defaults failed silently.</b> A framework upgrade renamed the database
+  connection property, so every container connected to itself instead of the database. Metrics
+  export was off by default, so the monitoring endpoint returned 404. The test library made replica
+  sets opt-in, so the database under test was quietly the wrong kind. None of the three logged
+  anything — all were caught by tests asserting the thing rather than assuming it.</p>
+</div>
+
+<h2>Design decisions</h2>
+<p>Seven <a href="https://github.com/Pranay847/chronos-scheduler/tree/main/docs/adr">architecture
+decision records</a>, one page each — what was chosen, what was rejected, and what it costs.
+Including <a href="https://github.com/Pranay847/chronos-scheduler/blob/main/docs/adr/0001-mongodb-findandmodify-not-a-queue.md">why
+a message queue would have been the better answer</a> for a different workload, and
+<a href="https://github.com/Pranay847/chronos-scheduler/blob/main/docs/adr/0007-worker-clock-for-lease-expiry.md">a
+known limitation left in place</a> with the metric that should trigger revisiting it.</p>
+
+<h2>Run it yourself</h2>
+<pre><code>git clone https://github.com/Pranay847/chronos-scheduler
+cd chronos-scheduler
+docker compose up -d --build --scale worker=3</code></pre>
+<p>Dashboard at <code>localhost:3000</code>. Then kill workers mid-run and watch nothing get
+lost:</p>
+<pre><code>./load/chaos.sh 4000 40 5 2</code></pre>
+
+</main>
+
+<footer class="wrap">
+  Built by <a href="https://github.com/Pranay847">Pranay Karakoti</a> ·
+  <a href="https://github.com/Pranay847/chronos-scheduler">Source</a> ·
+  Every number on this page is reproducible with a command in the repository.
+</footer>
+
+</body>
+</html>
