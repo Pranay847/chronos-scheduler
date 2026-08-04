@@ -1,0 +1,59 @@
+# Fly.io app config.
+#
+#   flyctl launch --no-deploy      # generates nothing further; this file already exists
+#   flyctl secrets set SPRING_MONGODB_URI="mongodb+srv://...?retryWrites=true&w=majority"
+#   flyctl deploy
+#
+# One worker, one machine. Fly's free allowance covers this comfortably; going beyond one
+# instance or one shared-cpu-1x machine starts billing. The scheduler design does not care —
+# "one worker" is just the fleet size of one, and everything about the atomic claim and lease
+# recovery works identically whether the fleet is 1 or 30.
+
+app = "chronos-scheduler"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  # Neither security switch is set here, so both take their secure defaults —
+  # allow-private-targets=false, require-api-key=true. See docker-compose.prod-check.yml for how
+  # that combination was verified before ever pointing it at a real deployment.
+  #
+  # CHANGE_STREAM_ENABLED is off here rather than left at its default. Atlas's free M0 tier has
+  # shared-tier oplog behaviour that can roll over faster than a worker can resume from its
+  # token, and BENCHMARKS.md §4 already shows the feature is roughly a wash at the 200ms poll
+  # interval this runs at — so there is nothing to give up by disabling it against a free
+  # database. Turn it back on if you upgrade off M0.
+  CHRONOS_CHANGE_STREAM_ENABLED = "false"
+  CHRONOS_POLL_INTERVAL_MS = "200"
+
+# SPRING_MONGODB_URI is deliberately absent from here: it is a credential, not config. Set with
+# `flyctl secrets set`, which stores it encrypted rather than in this file, which is committed.
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+
+  # A scheduler must not be scaled to zero. Fly's idle-scaling stops machines when there is no
+  # HTTP traffic, which is exactly wrong here: the poller has no HTTP traffic to keep it alive,
+  # so a scheduler that is "idle" by that measure is a scheduler that has stopped scheduling.
+  # A job due at 3am on a machine that scaled to zero at 2am simply never fires, silently.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "45s"
+    method = "GET"
+    path = "/actuator/health"
+    protocol = "http"
+
+[[vm]]
+  # The free allowance. Enough to run the JVM and hold a modest number of in-flight virtual-thread
+  # deliveries; not enough to repeat the BENCHMARKS.md load figures, which were measured against
+  # three full-size containers.
+  size = "shared-cpu-1x"
+  memory = "512mb"

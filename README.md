@@ -205,7 +205,8 @@ docker compose up -d --build --scale worker=3   # full stack
 The demo stack sets `allow-private-targets=true` and `require-api-key=false` — every address inside
 a compose network is RFC 1918 private, which is exactly what the SSRF guard blocks. **Both default
 to the secure value and must stay there in a real deployment.** See
-[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for AWS App Runner + Atlas, or
+[docs/FLY_DEPLOY.md](docs/FLY_DEPLOY.md) for a free Fly.io + Atlas M0 path.
 
 ---
 
