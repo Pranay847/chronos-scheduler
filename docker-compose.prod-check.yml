@@ -1,0 +1,32 @@
+# Production security configuration, run locally.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod-check.yml up -d --scale worker=1
+#
+# The base compose file disables both security switches, because every address inside a compose
+# network is RFC 1918 private and a local stack could not otherwise deliver to its own sink. That
+# means the configuration a real deployment actually runs has never been started.
+#
+# This override flips both back to their production values so that gap can be closed before AWS
+# does it for you. Expect deliveries to the in-network sink to FAIL under this file — that is the
+# SSRF guard working, and it is the point.
+#
+# NOTE: these are set to explicit values rather than blanked out. Compose has no way to *remove* a
+# key an earlier file declared, and setting one to "" is not the same as unsetting it — the variable
+# is still passed, now empty, and Spring cannot bind an empty string to a primitive boolean:
+#
+#     APPLICATION FAILED TO START
+#     Failed to bind properties under 'chronos.security.require-api-key' to boolean:
+#         Reason: A null value cannot be assigned to a primitive type
+#
+# Which is defensible behaviour for a security switch — refusing to start beats guessing — but it
+# does mean a blank field in an App Runner or ECS console produces a crash loop rather than a
+# default. Worth knowing before diagnosing it at 2am.
+services:
+  worker:
+    environment:
+      CHRONOS_SECURITY_ALLOW_PRIVATE_TARGETS: "false"
+      CHRONOS_SECURITY_REQUIRE_API_KEY: "true"
+    ports:
+      # The base file publishes no worker port so that --scale works. One instance is enough to
+      # check configuration, so a port is published here to make the API reachable.
+      - "8080:8080"
