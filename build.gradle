@@ -1,0 +1,53 @@
+plugins {
+	id 'java'
+	id 'org.springframework.boot' version '4.1.0'
+	id 'io.spring.dependency-management' version '1.1.7'
+}
+
+group = 'dev.pranay'
+version = '0.0.1-SNAPSHOT'
+
+java {
+	toolchain {
+		languageVersion = JavaLanguageVersion.of(21)
+	}
+}
+
+repositories {
+	mavenCentral()
+}
+
+dependencies {
+	implementation 'org.springframework.boot:spring-boot-starter-actuator'
+	implementation 'org.springframework.boot:spring-boot-starter-data-mongodb'
+	implementation 'org.springframework.boot:spring-boot-starter-validation'
+	implementation 'org.springframework.boot:spring-boot-starter-webmvc'
+	// Drift is the headline metric (§8) and it has to aggregate across workers, which means
+	// Prometheus buckets rather than per-instance percentiles. Version is managed by Boot.
+	runtimeOnly 'io.micrometer:micrometer-registry-prometheus'
+	testImplementation 'org.springframework.boot:spring-boot-starter-actuator-test'
+	testImplementation 'org.springframework.boot:spring-boot-starter-data-mongodb-test'
+	testImplementation 'org.springframework.boot:spring-boot-starter-validation-test'
+	testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
+	testImplementation 'org.springframework.boot:spring-boot-testcontainers'
+	testImplementation 'org.testcontainers:testcontainers-junit-jupiter'
+	testImplementation 'org.testcontainers:testcontainers-mongodb'
+	// TestRestTemplate's auto-configuration needs RestTemplateBuilder, which Boot 4 moved into
+	// spring-boot-restclient and which spring-boot-resttestclient does not pull transitively.
+	// Without it the context fails at bean-type deduction with a NoClassDefFoundError whose
+	// message names neither TestRestTemplate nor this artifact.
+	testImplementation 'org.springframework.boot:spring-boot-starter-restclient'
+	// Fake webhook receiver. `-standalone` shades Jetty and Jackson, which matters here:
+	// WireMock 3.x uses Jackson 2 internally and Boot 4 is on Jackson 3, so the unshaded
+	// artifact would drag a second Jackson onto the test classpath.
+	testImplementation 'org.wiremock:wiremock-standalone:3.13.1'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test') {
+	useJUnitPlatform()
+	// Activates src/test/resources/application-test.properties as an overlay on the main config.
+	// A test-classpath application.properties would have replaced the main file outright instead
+	// of adding to it, quietly unconfiguring the application under test.
+	systemProperty 'spring.profiles.active', 'test'
+}

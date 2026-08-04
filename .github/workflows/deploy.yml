@@ -1,0 +1,100 @@
+name: Deploy
+
+# Manual only, deliberately.
+#
+# A scheduler that fires real webhooks at real customer endpoints is not something to redeploy on
+# every merge to main without a person deciding to. Add a `push: branches: [main]` trigger once
+# there is a staging environment to catch a bad build first.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "deploy" to confirm'
+        required: true
+
+permissions:
+  # Required for OIDC. This is the whole point of the job below: GitHub mints a short-lived token
+  # that AWS trades for temporary credentials, so there is no long-lived AWS_SECRET_ACCESS_KEY in
+  # repository secrets to leak. A static key in a public repo's secrets is one misconfigured
+  # workflow away from being printed into a log.
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: chronos-scheduler
+  APP_RUNNER_SERVICE: chronos-scheduler
+
+jobs:
+  deploy:
+    name: Push to ECR and deploy to App Runner
+    runs-on: ubuntu-latest
+    if: inputs.confirm == 'deploy'
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # An IAM role whose trust policy allows this repository — and ideally this branch — to
+          # assume it. No stored access key anywhere.
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Tagged with the commit SHA rather than only `latest`, so a rollback is a redeploy of a
+      # known image instead of a rebuild of a hopefully-identical one.
+      - name: Deploy to App Runner
+        run: |
+          aws apprunner start-deployment \
+            --service-arn "${{ secrets.APP_RUNNER_SERVICE_ARN }}" \
+            --region "${{ env.AWS_REGION }}"
+
+      - name: Wait for the deployment to settle
+        run: |
+          for i in $(seq 1 60); do
+            STATUS=$(aws apprunner describe-service \
+              --service-arn "${{ secrets.APP_RUNNER_SERVICE_ARN }}" \
+              --region "${{ env.AWS_REGION }}" \
+              --query 'Service.Status' --output text)
+            echo "attempt $i: $STATUS"
+            case "$STATUS" in
+              RUNNING) echo "deployment succeeded"; exit 0 ;;
+              CREATE_FAILED|DELETE_FAILED) echo "deployment failed"; exit 1 ;;
+            esac
+            sleep 15
+          done
+          echo "timed out waiting for RUNNING"; exit 1
+
+      # A green deploy that serves errors is not a green deploy. App Runner reports RUNNING as soon
+      # as the container is up, which is before the application has proven it can reach MongoDB.
+      - name: Smoke test
+        run: |
+          URL=$(aws apprunner describe-service \
+            --service-arn "${{ secrets.APP_RUNNER_SERVICE_ARN }}" \
+            --region "${{ env.AWS_REGION }}" \
+            --query 'Service.ServiceUrl' --output text)
+
+          echo "checking https://$URL/actuator/health"
+          for i in $(seq 1 20); do
+            BODY=$(curl -fsS "https://$URL/actuator/health" || true)
+            echo "$BODY" | grep -q '"status":"UP"' && { echo "healthy"; exit 0; }
+            sleep 10
+          done
+          echo "service never reported UP"; exit 1

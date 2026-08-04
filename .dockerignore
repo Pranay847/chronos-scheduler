@@ -1,0 +1,22 @@
+# Build output and caches — the image builds its own, and shipping the host's would both bloat the
+# context and risk baking in a jar that doesn't match the sources next to it.
+build/
+.gradle/
+out/
+bin/
+
+# IDE and OS noise
+.idea/
+*.iml
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Nothing here affects the build
+docs/
+load/
+*.md
+.git/
+.github/
+docker-compose.yml
+Dockerfile

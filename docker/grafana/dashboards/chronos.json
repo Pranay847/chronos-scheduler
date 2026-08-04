@@ -1,0 +1,186 @@
+{
+  "title": "Chronos — Scheduler Health",
+  "uid": "chronos-health",
+  "tags": ["chronos", "scheduler"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Scheduling precision — the headline metric",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Scheduling drift percentiles (fleet-wide)",
+      "description": "How late a job fired relative to when it was scheduled to. Computed with histogram_quantile over buckets summed across every worker — NOT by averaging per-worker percentiles, which is meaningless. This is the number the project is measured by.",
+      "gridPos": { "h": 9, "w": 16, "x": 0, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "lineWidth": 2, "fillOpacity": 5 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.5 },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(scheduler_drift_seconds_bucket[$__rate_interval])) by (le))",
+          "legendFormat": "p99",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(scheduler_drift_seconds_bucket[$__rate_interval])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(scheduler_drift_seconds_bucket[$__rate_interval])) by (le))",
+          "legendFormat": "p50",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "p99 drift",
+      "description": "Fill this number into the resume bullet — and be able to explain how it was computed.",
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.5 },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(scheduler_drift_seconds_bucket[$__rate_interval])) by (le))",
+          "legendFormat": "p99",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Throughput and backlog",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 10 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Backlog depth (PENDING and overdue)",
+      "description": "Jobs whose scheduled time has passed but which no worker has claimed. Rising means the fleet is under-provisioned — this is the number to autoscale on, and the explanation when drift starts climbing.",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 11 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 10 } } },
+      "targets": [
+        { "expr": "max(scheduler_jobs_due_depth)", "legendFormat": "due depth", "refId": "A" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Delivery rate by outcome",
+      "description": "SUCCEEDED / FAILED / TIMEOUT / ERROR. TIMEOUT is broken out deliberately: it means we never learned whether the receiver processed the request, which is the case the idempotency key exists for.",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 11 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 10, "stacking": { "mode": "normal" } } } },
+      "targets": [
+        {
+          "expr": "sum(rate(scheduler_delivery_total[$__rate_interval])) by (outcome)",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Time spent in the receiver's endpoint",
+      "description": "Delivery duration p99 — how slow the customer's endpoint is, as distinct from how late we were in calling it. Separating the two is what stops someone else's slow server looking like our scheduling problem.",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 11 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(scheduler_delivery_duration_seconds_bucket[$__rate_interval])) by (le))",
+          "legendFormat": "p99",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(scheduler_delivery_duration_seconds_bucket[$__rate_interval])) by (le))",
+          "legendFormat": "p50",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Failure handling",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 19 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Retries vs dead letters",
+      "description": "Read together. Retries rising while dead letters stay flat is a downstream having a bad hour and recovering — the system working. Both rising means the retries are not helping and something is systematically wrong with the requests or the destination.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        { "expr": "sum(rate(scheduler_retries_total[$__rate_interval]))", "legendFormat": "retries scheduled", "refId": "A" },
+        { "expr": "sum(rate(scheduler_deadletters_total[$__rate_interval]))", "legendFormat": "dead-lettered", "refId": "B" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Crash recovery and contention",
+      "description": "Leases reclaimed is the best health signal here: a steady trickle is crash recovery working as designed, a spike means workers are dying or too overloaded to finish inside a lease — and it precedes duplicate deliveries, because every reclaim of a job that was still alive produces one. Lease lost should stay near zero; anything else means the lease is shorter than real queue wait.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "targets": [
+        { "expr": "sum(rate(scheduler_leases_reclaimed_total[$__rate_interval]))", "legendFormat": "leases reclaimed", "refId": "A" },
+        { "expr": "sum(rate(scheduler_lease_lost_total[$__rate_interval]))", "legendFormat": "lease lost mid-delivery", "refId": "B" },
+        { "expr": "sum(rate(scheduler_claim_contention_total[$__rate_interval]))", "legendFormat": "claim contention", "refId": "C" },
+        { "expr": "sum(rate(scheduler_jobs_quarantined_total[$__rate_interval]))", "legendFormat": "poison jobs quarantined", "refId": "D" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Fleet",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 28 }
+    },
+    {
+      "type": "stat",
+      "title": "Workers scraped",
+      "description": "Proves the panels above really are fleet-wide. If this reads 1 while three containers are running, DNS service discovery is not finding them and every aggregate on this dashboard is one worker's view wearing a fleet's label.",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 29 },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 2 } ] } } },
+      "targets": [
+        { "expr": "count(up{job=\"chronos-workers\"} == 1)", "legendFormat": "workers up", "refId": "A" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Deliveries per worker",
+      "description": "Work should spread roughly evenly across the fleet with no coordination between workers — that even split is the atomic claim doing its job. One worker taking everything means the others are losing every race.",
+      "gridPos": { "h": 6, "w": 18, "x": 6, "y": 29 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        {
+          "expr": "sum(rate(scheduler_delivery_total[$__rate_interval])) by (worker)",
+          "legendFormat": "{{worker}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

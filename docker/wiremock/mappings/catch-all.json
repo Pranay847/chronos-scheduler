@@ -1,0 +1,13 @@
+{
+  "priority": 10,
+  "request": {
+    "method": "ANY",
+    "urlPattern": ".*"
+  },
+  "response": {
+    "status": 200,
+    "body": "ok",
+    "headers": { "Content-Type": "text/plain" },
+    "fixedDelayMilliseconds": 15
+  }
+}

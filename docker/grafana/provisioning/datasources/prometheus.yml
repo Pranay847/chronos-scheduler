@@ -1,0 +1,20 @@
+# Datasource provisioning.
+#
+# Provisioned rather than clicked, so `docker compose up` produces a working dashboard with no
+# manual setup. A dashboard that needs ten minutes of clicking before it shows anything is a
+# dashboard nobody looks at — including whoever clones this repo to see whether the numbers in the
+# README are real.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      # Must match prometheus.yml's scrape_interval, or Grafana suggests $__rate_interval values
+      # that are shorter than the scrape and every rate() panel comes back empty.
+      timeInterval: 5s

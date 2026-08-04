@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # One run per branch. A push that supersedes an in-flight run cancels it rather than queueing —
+  # this suite starts real containers, so parallel runs on the same branch compete for the runner's
+  # Docker daemon and both get slower.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          # Caches ~/.gradle based on the build files. The Testcontainers images are the slow part
+          # and cannot be cached this way, but dependency resolution can.
+          cache: gradle
+
+      # No explicit Docker setup step: ubuntu-latest runners ship with a running daemon, which is
+      # all Testcontainers needs. The suite starts a real MongoDB replica set rather than mocking
+      # the database — the atomic claim is a MongoDB behaviour, so a mocked test of it would assert
+      # only that the mock behaves as written.
+      - name: Verify Docker is available
+        run: docker info --format 'Docker {{.ServerVersion}} ready'
+
+      - name: Run tests
+        run: ./gradlew test --no-daemon --console=plain
+
+      # Published even when tests fail — a red run with no visible reason is a red run someone
+      # reruns instead of reading.
+      - name: Publish test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            build/reports/tests/test/
+            build/test-results/test/
+          retention-days: 14
+
+      - name: Build jar
+        run: ./gradlew bootJar --no-daemon --console=plain -x test
+
+  image:
+    name: Build container image
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Built on every PR but pushed nowhere. Catches Dockerfile breakage at review time instead of
+      # at deploy time, which is the only moment it would otherwise surface.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: chronos-scheduler:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

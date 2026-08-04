@@ -1,0 +1,171 @@
+# Chronos local stack.
+#
+#   docker compose up --build --scale worker=3
+#
+# Three identical workers, no leader, no per-instance configuration. That property — scale by
+# adding containers and reconfigure nothing — is the whole point of coordinating through an atomic
+# claim rather than through a membership protocol.
+#
+# Prometheus, Grafana, and the WireMock receiver join this file in Phase 7.
+
+services:
+  mongo:
+    image: mongo:7
+    container_name: chronos-mongo
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+
+    # Self-initiating replica set.
+    #
+    # rs.initiate() cannot run from docker-entrypoint-initdb.d: that stage executes before the
+    # server is a primary, so writes there fail with NotWritablePrimary. Driving it from the
+    # healthcheck fixes the ordering — the check runs against a live server, initiates on its first
+    # pass, and reports ok on every pass after. The container is not "healthy" until the replica
+    # set is, so `condition: service_healthy` below is a real guarantee rather than a sleep.
+    #
+    # The member is advertised as `mongo:27017` because the workers connect from inside this
+    # network, and a replica set tells clients where its members live — clients then connect to
+    # whatever they were told. Advertising `localhost` would send every worker to itself.
+    # From the host, use ?directConnection=true (see below).
+    healthcheck:
+      test: >
+        mongosh --quiet --eval "
+          try { rs.status().ok }
+          catch (e) {
+            rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'mongo:27017' }] }).ok
+          }
+        "
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 10s
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      # Inside the network the advertised member name resolves, so full replica-set discovery works
+      # and change streams (Phase 9) will have what they need.
+      # SPRING_MONGODB_URI, not SPRING_DATA_MONGODB_URI — Boot 4 moved connection properties to
+      # the `spring.mongodb` prefix. The old name binds to nothing and the driver quietly falls
+      # back to localhost:27017, which inside a container is the container itself.
+      SPRING_MONGODB_URI: mongodb://mongo:27017/chronos?replicaSet=rs0
+
+      # DEMO STACK ONLY — and the reason is worth understanding rather than copying.
+      #
+      # Every address inside a compose network is RFC 1918 private (172.16/12 here), which is
+      # exactly what the SSRF guard blocks. So a local stack whose receiver is another container
+      # cannot deliver anything with the guard at its production setting: the guard is working
+      # correctly and the delivery is genuinely to a private address.
+      #
+      # A real deployment sends to customer endpoints on the public internet and MUST leave this
+      # false. The application logs a warning at startup whenever it is true.
+      CHRONOS_SECURITY_ALLOW_PRIVATE_TARGETS: "true"
+      # Likewise: no tenant provisioning flow in a throwaway stack.
+      CHRONOS_SECURITY_REQUIRE_API_KEY: "false"
+
+      # Change-stream wakeup. Toggled by load/drift-compare.sh to measure what it buys against the
+      # polling baseline. Defaults on; polling still runs underneath, so switching it off costs
+      # latency and nothing else.
+      CHRONOS_CHANGE_STREAM_ENABLED: "${CHRONOS_CHANGE_STREAM_ENABLED:-true}"
+      CHRONOS_POLL_INTERVAL_MS: "${CHRONOS_POLL_INTERVAL_MS:-200}"
+      # Deliberately not pinned per container: WorkerIdentity derives an id from the container
+      # hostname plus a random suffix, so scaling needs no per-instance configuration.
+      JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=75"
+
+    # No fixed container_name and no host port mapping — both would prevent --scale from starting
+    # more than one. Reach a specific worker with `docker compose exec worker ...`, or publish a
+    # range if you need the actuator from outside.
+    expose:
+      - "8080"
+
+    # Longer than PollerService's 10s drain, so a `docker compose stop` gets to release its claims
+    # instead of being killed mid-shutdown. Too short and every graceful stop degrades into the
+    # crash path, stranding jobs for a full lease.
+    stop_grace_period: 30s
+
+    deploy:
+      replicas: 1  # overridden by --scale worker=N
+
+  # Stand-in for a customer's endpoint. Returns 200 with a small delay, so delivery-duration
+  # panels show something other than zero and the drift metric is measured against a receiver that
+  # behaves like a real one rather than an instant loopback.
+  sink:
+    image: wiremock/wiremock:3.13.1
+    container_name: chronos-sink
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./docker/wiremock/mappings:/home/wiremock/mappings:ro
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: chronos-prometheus
+    depends_on:
+      - worker
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=6h
+      # Lets you POST to /-/reload after editing the scrape config, instead of restarting and
+      # losing the series you were in the middle of looking at.
+      - --web.enable-lifecycle
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    container_name: chronos-grafana
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+    environment:
+      # Anonymous admin. Fine for a stack that only ever binds to localhost, and wrong anywhere
+      # else — the point is that `docker compose up` gives a working dashboard with no login
+      # ceremony, because a dashboard behind a setup wizard is one nobody ever sees.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_DEFAULT_THEME: dark
+      # Server-side PNG rendering, so the README screenshot is a reproducible artifact rather than
+      # something someone cropped once and never updated:
+      #   curl "http://localhost:3000/render/d/chronos-health/...&width=1600&height=1200" -o docs/grafana-dashboard.png
+      GF_RENDERING_SERVER_URL: http://renderer:8081/render
+      GF_RENDERING_CALLBACK_URL: http://grafana:3000/
+      GF_LOG_FILTERS: rendering:debug
+      # Open straight on the dashboard rather than the home page.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/chronos.json
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+
+  # Headless Chromium that Grafana calls to produce PNGs of its own dashboards.
+  renderer:
+    image: grafana/grafana-image-renderer:3.12.1
+    container_name: chronos-renderer
+    environment:
+      ENABLE_METRICS: "false"
+
+volumes:
+  mongo-data:
+  prometheus-data:
+  grafana-data:
+# Connecting from the host (bootRun, curl, load/seed-jobs.ps1):
+#
+#   mongodb://localhost:27017/chronos?directConnection=true
+#
+# The replica set advertises `mongo:27017`, which does not resolve outside the compose network, so
+# a discovery-mode client would find the seed and then fail to reach the member it was told about.
+# directConnection skips topology discovery and talks to the node in front of it. The server is
+# still a replica set member, so change streams and transactions remain available.

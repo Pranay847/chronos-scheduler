@@ -1,0 +1,39 @@
+# Prometheus scrape configuration.
+
+global:
+  # Fast for a demo stack. Production would be 15-30s; the trade is resolution against storage,
+  # and 5s is chosen here so a 60-second load run produces a graph with shape rather than a
+  # dozen points.
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: chronos-workers
+    metrics_path: /actuator/prometheus
+
+    # DNS service discovery against the compose service name.
+    #
+    # This is the part that matters, and the reason it isn't a static list. `docker compose up
+    # --scale worker=3` produces three containers with no fixed addresses, and Docker's embedded
+    # DNS returns an A record per replica for the service name. Prometheus resolves `worker`,
+    # finds every instance, and scrapes them all — so scaling the fleet needs no change here.
+    #
+    # It is also what makes the drift panel honest. `histogram_quantile` over
+    # `sum(...) by (le)` is only a fleet-wide p99 if Prometheus is actually collecting from the
+    # whole fleet; with a static single target it would silently report one worker's view while
+    # looking identical on the dashboard.
+    dns_sd_configs:
+      - names: ['worker']
+        type: A
+        port: 8080
+        refresh_interval: 10s
+
+    relabel_configs:
+      # Keep the container address as the instance label, so a per-worker breakdown is possible
+      # even though the `worker` label from the application is the one usually grouped on.
+      - source_labels: [__address__]
+        target_label: instance
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
