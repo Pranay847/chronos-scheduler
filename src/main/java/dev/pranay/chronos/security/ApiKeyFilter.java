@@ -58,7 +58,18 @@ public class ApiKeyFilter extends OncePerRequestFilter {
         // Health and metrics are infrastructure endpoints — a liveness probe has no API key, and
         // Prometheus scrapes are secured at the network layer rather than with a tenant credential.
         // Tenant creation is bootstrap: there is no key to present before the first one exists.
-        return path.startsWith("/actuator") || path.equals("/v1/tenants");
+        //
+        // The landing page is exempt because it is a static file with nothing tenant-scoped on it.
+        // Without this the root URL answers a browser with a raw 401 problem document, which is
+        // correct behaviour and a terrible front door. Note this is an exact-match list, not a
+        // prefix: `/` must not become a prefix rule or it exempts the entire API.
+        return path.startsWith("/actuator")
+                || path.equals("/v1/tenants")
+                || isLandingPage(path);
+    }
+
+    private static boolean isLandingPage(String path) {
+        return path.equals("/") || path.equals("/index.html") || path.equals("/favicon.ico");
     }
 
     @Override

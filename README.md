@@ -34,7 +34,7 @@ does not demonstrate.
 | **Duplicate rate** | **0.05%**, every one carrying a stable idempotency key |
 | **Claim query** | **1.2 ms** at 200K jobs — 99.2% faster than a naive index |
 | **Creation throughput** | ~24,000 jobs/min, 0 failures, p95 72 ms |
-| **Tests** | 164, including 1,000 jobs × 10 concurrent workers |
+| **Tests** | 169, including 1,000 jobs × 10 concurrent workers |
 
 Full numbers and how to reproduce them: **[BENCHMARKS.md](BENCHMARKS.md)** · **[CHAOS.md](CHAOS.md)**
 
@@ -201,7 +201,7 @@ pinning the connection to the validated IP with SNI configured. See
 
 ```bash
 docker compose up -d --build --scale worker=3   # full stack
-./gradlew test                                  # 164 tests (needs Docker for Testcontainers)
+./gradlew test                                  # 169 tests (needs Docker for Testcontainers)
 ./load/chaos.sh 4000 40 5 2                     # kill workers, assert no loss
 ./load/drift-compare.sh 300 2000                # change streams on vs off
 ```
@@ -223,9 +223,10 @@ Deploying it somewhere:
   sleeping-instance caveat: a free instance that has slept isn't firing anything, and that section
   explains what the design does about it.
 - **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** — AWS App Runner + Atlas M10, the real one.
-- **[docs/FLY_DEPLOY.md](docs/FLY_DEPLOY.md)** — Fly.io, which *didn't* work. Kept because the
-  reason is interesting: Atlas rejects TLS from Fly's network specifically, isolated with the same
-  handshake from two networks.
+- **[docs/FLY_DEPLOY.md](docs/FLY_DEPLOY.md)** — Fly.io, abandoned. Kept for the debugging
+  post-mortem: a TLS error I diagnosed confidently and wrongly, what the flawed experiment was, and
+  the single contradicting observation that finally broke it. The real cause was an Atlas IP access
+  list containing one entry.
 
 ---
 

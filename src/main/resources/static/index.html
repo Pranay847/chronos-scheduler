@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chronos — live instance</title>
+<meta name="description" content="Live instance of Chronos, a distributed job and webhook scheduler. Java 21, Spring Boot 4, MongoDB.">
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --line:#30363d; --ink:#e6edf3; --dim:#8b949e;
+    --accent:#58a6ff; --good:#3fb950; --warn:#d29922; --bad:#f85149;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+       -webkit-font-smoothing:antialiased}
+  .wrap{max-width:880px;margin:0 auto;padding:0 24px}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono);font-size:.88em;background:#1f2630;padding:.15em .4em;border-radius:4px}
+  pre{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:15px;overflow-x:auto;
+      font-family:var(--mono);font-size:.83rem;line-height:1.6;margin:12px 0}
+  .cmt{color:#8b949e}
+  h2{font-size:1.4rem;margin:52px 0 8px;letter-spacing:-.01em}
+  p{color:#c9d1d9}
+
+  header{border-bottom:1px solid var(--line);padding:56px 0 36px;
+    background:radial-gradient(900px 300px at 50% -80px, rgba(88,166,255,.10), transparent 70%)}
+  h1{font-size:2.4rem;margin:0 0 6px;letter-spacing:-.03em}
+  .tag{color:var(--dim);font-size:1.04rem;margin:0 0 20px}
+  .stack{font-family:var(--mono);font-size:.78rem;color:var(--dim)}
+  .cta{margin-top:24px;display:flex;gap:10px;flex-wrap:wrap}
+  .btn{border:1px solid var(--line);background:var(--panel);color:var(--ink);
+       padding:9px 16px;border-radius:7px;font-size:.9rem;display:inline-block}
+  .btn:hover{border-color:var(--accent);text-decoration:none}
+  .btn.primary{background:#1f6feb;border-color:#1f6feb;color:#fff}
+
+  .live{display:flex;align-items:center;gap:10px;margin:26px 0 0;padding:13px 16px;
+        background:var(--panel);border:1px solid var(--line);border-radius:9px;font-size:.9rem}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--dim);flex:none}
+  .dot.up{background:var(--good);box-shadow:0 0 0 3px rgba(63,185,80,.18)}
+  .dot.down{background:var(--bad);box-shadow:0 0 0 3px rgba(248,81,73,.18)}
+  #healthtext{color:var(--dim)}
+  #healthtext .up{color:var(--good);font-weight:600}
+  #healthtext .down{color:var(--bad);font-weight:600}
+
+  .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:30px 0 0}
+  .metric{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:15px}
+  .metric b{display:block;font-size:1.6rem;letter-spacing:-.02em;color:var(--good);font-family:var(--mono)}
+  .metric span{display:block;color:var(--dim);font-size:.75rem;margin-top:4px;line-height:1.45}
+
+  .note{border-left:3px solid var(--accent);background:rgba(88,166,255,.06);
+        padding:13px 17px;margin:18px 0;border-radius:0 7px 7px 0}
+  .note.amber{border-color:var(--warn);background:rgba(210,153,34,.07)}
+  .note p{margin:0;color:#c9d1d9;font-size:.93rem}
+
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:.88rem;display:block;overflow-x:auto}
+  th,td{border:1px solid var(--line);padding:8px 11px;text-align:left;white-space:nowrap}
+  th{background:var(--panel);font-weight:600;color:var(--dim);font-size:.78rem;
+     text-transform:uppercase;letter-spacing:.04em}
+  td.mono{font-family:var(--mono)}
+
+  footer{border-top:1px solid var(--line);margin-top:64px;padding:28px 0 48px;color:var(--dim);font-size:.85rem}
+  @media(max-width:600px){h1{font-size:1.9rem}}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <h1>Chronos</h1>
+    <p class="tag">A distributed job &amp; webhook scheduler. This is a live instance.</p>
+    <p class="stack">Java 21 · Spring Boot 4.1 · MongoDB · at-least-once delivery · lease-based crash recovery</p>
+
+    <div class="live">
+      <span class="dot" id="dot"></span>
+      <span id="healthtext">checking /actuator/health&hellip;</span>
+    </div>
+
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/Pranay847/chronos-scheduler">Source on GitHub</a>
+      <a class="btn" href="https://pranay847.github.io/chronos-scheduler/">How it works</a>
+      <a class="btn" href="/actuator/health">/actuator/health</a>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <div class="metrics">
+    <div class="metric"><b>236 ms</b><span>p99 scheduling drift, 3 workers</span></div>
+    <div class="metric"><b>zero</b><span>jobs lost with 2 of 5 workers SIGKILLed</span></div>
+    <div class="metric"><b>1.2 ms</b><span>claim query at 200K jobs</span></div>
+    <div class="metric"><b>166</b><span>tests</span></div>
+  </div>
+
+  <div class="note amber">
+    <p><strong>Those numbers were not measured here.</strong> They come from a three-worker stack on
+    real hardware — see <a href="https://github.com/Pranay847/chronos-scheduler/blob/main/BENCHMARKS.md">BENCHMARKS.md</a>
+    for how to reproduce them. This page is one free-tier instance that sleeps when idle, and a
+    sleeping scheduler fires nothing. It proves the API, the authentication and the SSRF guard are
+    real. It cannot prove the timing.</p>
+  </div>
+
+  <h2>If you landed here from a 401</h2>
+
+  <p>That was the point. Every endpoint except health, metrics and tenant bootstrap requires an API
+  key, so an unauthenticated request gets <code>401</code> with an RFC 7807 body rather than a login
+  page. Try it:</p>
+
+<pre>curl -i https://chronos-scheduler-o20q.onrender.com/v1/jobs</pre>
+
+  <h2>Try it for real</h2>
+
+  <p>Tenant creation is deliberately unauthenticated — there is no key to present before the first
+  one exists. It returns an API key and an HMAC signing secret, shown once.</p>
+
+<pre>curl -X POST https://chronos-scheduler-o20q.onrender.com/v1/tenants \
+  -H 'Content-Type: application/json' -d '{"name":"you"}'</pre>
+
+  <p>Then schedule something. Every delivery carries a stable idempotency key and an HMAC signature
+  over the exact transmitted bytes:</p>
+
+<pre>curl -X POST https://chronos-scheduler-o20q.onrender.com/v1/jobs \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{
+    "name": "hello",
+    "schedule": { "type": "ONE_TIME", "runAt": "2030-06-01T12:00:00Z" },
+    "target":   { "url": "https://example.com/hook", "payload": {"id": 1} }
+  }'</pre>
+
+  <p>And watch the SSRF guard refuse to fetch cloud instance metadata — the attack that turns a
+  webhook scheduler into a credential exfiltration tool:</p>
+
+<pre>curl -i -X POST https://chronos-scheduler-o20q.onrender.com/v1/jobs \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{
+    "name": "ssrf",
+    "schedule": { "type": "ONE_TIME", "runAt": "2030-01-01T00:00:00Z" },
+    "target":   { "url": "http://169.254.169.254/latest/meta-data/" }
+  }'
+<span class="cmt"># 400 — link-local / cloud instance metadata</span></pre>
+
+  <h2>Endpoints</h2>
+
+  <table>
+    <thead><tr><th>Method</th><th>Path</th><th>Auth</th><th></th></tr></thead>
+    <tbody>
+      <tr><td class="mono">POST</td><td class="mono">/v1/tenants</td><td>none</td><td>bootstrap a key</td></tr>
+      <tr><td class="mono">POST</td><td class="mono">/v1/jobs</td><td>bearer</td><td>ONE_TIME or CRON</td></tr>
+      <tr><td class="mono">GET</td><td class="mono">/v1/jobs/{id}</td><td>bearer</td><td>404 across tenants, not 403</td></tr>
+      <tr><td class="mono">POST</td><td class="mono">/v1/jobs/{id}/pause</td><td>bearer</td><td>resume, trigger, cancel too</td></tr>
+      <tr><td class="mono">GET</td><td class="mono">/v1/dead-letters</td><td>bearer</td><td>replayable</td></tr>
+      <tr><td class="mono">GET</td><td class="mono">/actuator/health</td><td>none</td><td>liveness</td></tr>
+      <tr><td class="mono">GET</td><td class="mono">/actuator/prometheus</td><td>none</td><td>metrics</td></tr>
+    </tbody>
+  </table>
+
+  <h2>The interesting part</h2>
+
+  <p>Workers coordinate through a single atomic <code>findAndModify</code> against MongoDB. No
+  leader, no queue, no lock service — scaling is adding containers and configuring nothing.</p>
+
+  <p><strong>But the claim is only half of it.</strong> It stops two workers <em>starting</em> a job;
+  it does nothing about a slow worker whose lease expired mid-delivery <em>finishing</em> one that
+  has since been reassigned. So every terminal write re-asserts ownership, and a worker that lost its
+  lease discards its result instead of overwriting whoever owns the job now. That is the difference
+  between a duplicate delivery (fine, expected, deduplicable) and a corrupted schedule (not fine, and
+  silent).</p>
+
+  <p>The write-up covers that, the idempotency-key derivation that breaks every retry if you get it
+  wrong, and the two benchmarks that turned out to measure nothing:
+  <a href="https://pranay847.github.io/chronos-scheduler/">how it works &rarr;</a></p>
+
+  <footer>
+    Built by <a href="https://github.com/Pranay847">Pranay Karakoti</a> ·
+    <a href="https://github.com/Pranay847/chronos-scheduler">source</a> ·
+    free instance, sleeps after ~15 minutes idle
+  </footer>
+</div>
+
+<script>
+  // Same-origin fetch, so nothing external is contacted and there is no CORS involved. Health is
+  // public by design: a liveness probe has no API key to present.
+  //
+  // Built with createElement/textContent rather than innerHTML. The response is our own and the
+  // fields read are enums, but a status string interpolated into markup is exactly the shape that
+  // becomes an injection the moment someone adds a field carrying user input.
+  (function () {
+    var dot = document.getElementById('dot');
+    var txt = document.getElementById('healthtext');
+
+    function render(cls, label, detail) {
+      txt.textContent = '';
+      var strong = document.createElement('strong');
+      strong.className = cls;
+      strong.textContent = label;
+      txt.appendChild(strong);
+      txt.appendChild(document.createTextNode(' · ' + detail));
+    }
+
+    fetch('/actuator/health')
+      .then(function (r) {
+        return r.json().then(function (body) { return { ok: r.ok, body: body }; });
+      })
+      .then(function (res) {
+        var body = res.body || {};
+        var mongo = (body.components || {}).mongo || {};
+        if (res.ok && body.status === 'UP') {
+          dot.className = 'dot up';
+          render('up', 'UP', 'mongo ' + (mongo.status === 'UP' ? 'connected' : 'unknown'));
+        } else {
+          dot.className = 'dot down';
+          render('down', String(body.status || 'DOWN'), 'see /actuator/health');
+        }
+      })
+      .catch(function () {
+        dot.className = 'dot down';
+        txt.textContent = 'could not reach /actuator/health — the instance may be waking up, '
+          + 'which takes 30-60 seconds on a free tier. Try again shortly.';
+      });
+  })();
+</script>
+</body>
+</html>
