@@ -204,9 +204,17 @@ docker compose up -d --build --scale worker=3   # full stack
 
 The demo stack sets `allow-private-targets=true` and `require-api-key=false` — every address inside
 a compose network is RFC 1918 private, which is exactly what the SSRF guard blocks. **Both default
-to the secure value and must stay there in a real deployment.** See
-[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for AWS App Runner + Atlas, or
-[docs/FLY_DEPLOY.md](docs/FLY_DEPLOY.md) for a free Fly.io + Atlas M0 path.
+to the secure value and must stay there in a real deployment.**
+
+Deploying it somewhere:
+
+- **[docs/RENDER_DEPLOY.md](docs/RENDER_DEPLOY.md)** — free, no card, one Blueprint click. Note the
+  sleeping-instance caveat: a free instance that has slept isn't firing anything, and that section
+  explains what the design does about it.
+- **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** — AWS App Runner + Atlas M10, the real one.
+- **[docs/FLY_DEPLOY.md](docs/FLY_DEPLOY.md)** — Fly.io, which *didn't* work. Kept because the
+  reason is interesting: Atlas rejects TLS from Fly's network specifically, isolated with the same
+  handshake from two networks.
 
 ---
 

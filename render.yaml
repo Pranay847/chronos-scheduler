@@ -1,0 +1,40 @@
+# Render Blueprint — free-tier deploy. See docs/RENDER_DEPLOY.md for the walkthrough and the
+# honest list of what a sleeping free instance does to a scheduler.
+#
+# Render reads this on "New > Blueprint" and configures the service from it, so the only manual
+# step is pasting the Mongo connection string into the dashboard (see sync: false below).
+
+services:
+  - type: web
+    name: chronos-scheduler
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /actuator/health
+
+    envVars:
+      # Never committed. `sync: false` makes Render prompt for it in the dashboard instead, which
+      # is the whole point — this string contains the database password.
+      - key: SPRING_MONGODB_URI
+        sync: false
+
+      # The free instance is 512MB. The JVM's default max heap is a fraction of *visible* host
+      # memory, which in a container without this flag can be read as far more than the cgroup
+      # actually allows — the process then gets OOM-killed by the kernel rather than throwing
+      # OutOfMemoryError, so there is no stack trace and the logs just stop.
+      - key: JAVA_TOOL_OPTIONS
+        value: -XX:MaxRAMPercentage=75
+
+      # Off for the same reason as the Fly path: Atlas M0's shared oplog can roll over faster than
+      # a worker resumes its change stream, and BENCHMARKS.md §4 measured the feature as roughly a
+      # wash at the 200ms poll interval anyway. Polling alone is the honest default here.
+      - key: CHRONOS_CHANGE_STREAM_ENABLED
+        value: "false"
+
+      # Both security switches stay at their secure defaults — unlike docker-compose.yml, which
+      # flips them for the local demo. Stated explicitly rather than left implicit, because this
+      # instance is reachable from the internet and the compose file is not.
+      - key: CHRONOS_SECURITY_REQUIRE_API_KEY
+        value: "true"
+      - key: CHRONOS_SECURITY_ALLOW_PRIVATE_TARGETS
+        value: "false"

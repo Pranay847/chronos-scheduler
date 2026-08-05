@@ -4,6 +4,9 @@ An alternative to [`DEPLOYMENT.md`](DEPLOYMENT.md)'s AWS App Runner + Atlas M10 
 free, publicly-reachable instance rather than a production one. Read the tradeoffs section before
 running this against anything real.
 
+> **If you just want a free public instance, use [`RENDER_DEPLOY.md`](RENDER_DEPLOY.md) instead.**
+> This file is kept for the diagnosis, not the outcome.
+
 Both options below were attempted for real, and **neither has yet produced a working deployment** —
 Option A is blocked by something outside this project's control, Option B by Fly's billing rules.
 What follows is what was actually observed, including the dead ends, because the dead ends are the
