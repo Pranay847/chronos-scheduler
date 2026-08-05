@@ -1,0 +1,30 @@
+app = 'chronos-mongo-pk2026'
+primary_region = 'iad'
+
+[build]
+  image = 'mongo:7'
+
+[processes]
+  app = 'mongod --replSet rs0 --bind_ip_all'
+
+[env]
+  MONGO_INITDB_DATABASE = 'chronos'
+
+[mounts]
+  source = 'mongo_data'
+  destination = '/data/db'
+
+[[services]]
+  protocol = 'tcp'
+  internal_port = 27017
+  processes = ['app']
+  auto_stop_machines = 'off'
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[services.ports]]
+    port = 27017
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '512mb'
