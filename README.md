@@ -12,6 +12,17 @@ docker compose up -d --build --scale worker=3
 
 Three workers, no leader, no per-instance configuration. Dashboard at <http://localhost:3000>.
 
+**Live instance:** <https://chronos-scheduler-o20q.onrender.com/actuator/health>
+
+```bash
+curl -i https://chronos-scheduler-o20q.onrender.com/v1/jobs        # 401 - auth is enforced
+```
+
+A free instance, so it sleeps after ~15 minutes idle and the first request takes 30-60s to wake it.
+A sleeping scheduler fires nothing — the drift numbers below come from the local three-worker stack,
+not from this. See [docs/RENDER_DEPLOY.md](docs/RENDER_DEPLOY.md) for what the deployment does and
+does not demonstrate.
+
 ---
 
 ## Measured, not claimed

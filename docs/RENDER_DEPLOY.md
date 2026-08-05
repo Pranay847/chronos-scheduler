@@ -8,6 +8,43 @@ Render's free tier needs no payment method, builds the same `Dockerfile` everyth
 and gives an HTTPS URL. **Read the last section before showing it to anyone** — a free instance
 sleeps, and "a scheduler that sleeps" deserves an honest explanation rather than a footnote.
 
+Live at <https://chronos-scheduler-o20q.onrender.com>. Verified against that URL:
+
+| Check | Result |
+|---|---|
+| `/actuator/health` | `UP`, `mongo.database=chronos`, `ok=1` |
+| Unauthenticated `GET /v1/jobs` | `401` + `application/problem+json` |
+| SSRF probe → `169.254.169.254` | `400` — *link-local / cloud instance metadata* |
+| SSRF probe → `fd00::1` | `400` — *IPv6 unique local (ULA)* |
+| `POST /v1/jobs` | `201`, `PENDING`, correct `nextRunAt` |
+| Cross-tenant read | `404` (not `403` — see [tenant isolation](../README.md#security)) |
+| `/actuator/prometheus` | 162 `scheduler_*` / `jobs_*` series |
+
+The `fd00::1` row is the one worth keeping: that address passes every check in Java's
+`InetAddress.isSiteLocalAddress()` family, which tests the deprecated `fec0::/10`. It is caught here
+because the guard uses an explicit CIDR denylist instead.
+
+### Three things that broke on the way, all recorded so you skip them
+
+1. **`Database name must not be empty`** — Atlas hands you a connection string ending `/?retryWrites=…`
+   with no database between the `/` and the `?`. Add `chronos` there.
+2. **`SSLException: (internal_error)`** — the Atlas IP Access List contained only the IP the account
+   was created from. Atlas rejects non-allowlisted clients *during the TLS handshake* with a generic
+   alert, so it reads as a TLS bug rather than a firewall rule. Add `0.0.0.0/0`.
+   [`FLY_DEPLOY.md`](FLY_DEPLOY.md) documents how badly this can be misdiagnosed.
+3. **Health check timing out on a healthy app** — see below.
+
+### The health check had to be replaced
+
+Boot's auto-configured `MongoHealthIndicator` probes `hello` against the `local` database. Atlas
+reserves `local` and grants application users no privileges on it, so `/actuator/health` reported
+DOWN on a fully working service and Render killed the deploy after fifteen minutes of a passing
+application failing its readiness probe.
+[`MongoPingHealthIndicator`](../src/main/java/dev/pranay/chronos/config/MongoPingHealthIndicator.java)
+replaces it with `ping` against the application's own database. **164 tests did not catch this** —
+Testcontainers runs as root and reads `local` happily, so the permission model that breaks Atlas
+cannot be reproduced locally.
+
 ---
 
 ## 1. Database: Atlas M0

@@ -4,51 +4,69 @@ An alternative to [`DEPLOYMENT.md`](DEPLOYMENT.md)'s AWS App Runner + Atlas M10 
 free, publicly-reachable instance rather than a production one. Read the tradeoffs section before
 running this against anything real.
 
-> **If you just want a free public instance, use [`RENDER_DEPLOY.md`](RENDER_DEPLOY.md) instead.**
-> This file is kept for the diagnosis, not the outcome.
+> **If you just want a free public instance, use [`RENDER_DEPLOY.md`](RENDER_DEPLOY.md) instead** —
+> that path is deployed and verified. This file is kept for one debugging lesson, described below.
 
-Both options below were attempted for real, and **neither has yet produced a working deployment** —
-Option A is blocked by something outside this project's control, Option B by Fly's billing rules.
-What follows is what was actually observed, including the dead ends, because the dead ends are the
-part that would otherwise cost someone else the same afternoon.
+## The mistake this file exists to record
 
-**Verified status, precisely:**
+Deploying here failed with a TLS error, and **I diagnosed it wrong, confidently, and acted on the
+wrong diagnosis for hours.** The wrong conclusion was: *Atlas rejects TLS handshakes from Fly's
+network based on source-IP reputation.* That is not what was happening.
 
-| Step | Option A (Atlas M0) | Option B (self-hosted on Fly) |
-|---|---|---|
-| Database reachable from Fly | ❌ TLS rejected at Atlas's edge | ✅ replica set reached `PRIMARY` |
-| Scheduler connects to it | ❌ never succeeded | ⚠️ **not yet verified** — blocked before this point |
-| Health checks pass | ❌ | ⚠️ not yet reached |
+**What was actually happening:** the Atlas project's IP Access List contained a single entry — the
+developer's home IP, added automatically by Atlas's setup wizard. Atlas does not reject a
+non-allowlisted client with an authorization error. It **terminates the TLS handshake with a generic
+`internal_error` alert**, which is indistinguishable from a genuine TLS incompatibility:
+
+```
+javax.net.ssl.SSLException: (internal_error) Received fatal alert: internal_error
+```
+
+**Why the "proof" was worthless.** The isolating test was an `openssl s_client -tls1_2` handshake
+against the same shard IP from two networks: it succeeded locally and failed from inside a Fly
+machine. Same IP, same port, same TLS version — so the network path *must* be the variable. The
+reasoning was airtight and the conclusion was still wrong, because the local machine was the one
+network in the world that was allowlisted. The experiment established "these two networks differ"
+and nothing else; the *reason* for the difference was invented, not measured.
+
+**What exposed it:** redeploying on Render — a different company, a different network — produced the
+byte-identical error. "Atlas blocks Fly specifically" cannot explain that. One observation the
+hypothesis couldn't survive was worth more than the elaborate test that appeared to confirm it.
+
+**The lesson worth keeping:** a control test only controls for the variables you thought of. When an
+error message is generic (`internal_error` names nothing), treat any confident causal story about it
+as a hypothesis awaiting a second, independent observation — especially when the story is
+unfalsifiable from where you're standing. The cheap check here was one click: look at the access
+list. It was never done, because the expensive test felt conclusive.
+
+The fix was adding `0.0.0.0/0` to the IP Access List. **Fly was never the problem** — this path
+would likely have worked. It was abandoned for Fly's billing restrictions (below), not for TLS.
 
 ---
 
-## Option A: Atlas M0 — free, but does not currently work from Fly
+## Option A: Atlas M0 + Fly
 
 1. [cloud.mongodb.com](https://cloud.mongodb.com) → new project → **M0** cluster.
 2. Database Access → add a user, `readWrite` on the `chronos` database.
-3. Network Access → **Allow access from anywhere** (`0.0.0.0/0`). M0 has no private networking or
-   VPC peering, so this is the only option — a real limitation, noted below.
-4. Copy the connection string: `mongodb+srv://<user>:<pass>@<cluster>.mongodb.net/chronos`
+3. Network Access → **Allow access from anywhere** (`0.0.0.0/0`). **Do not skip this.** Atlas's
+   setup wizard allowlists only the IP you signed up from, and every hosted platform will be a
+   different IP. M0 has no private networking or VPC peering, so `0.0.0.0/0` is the only option —
+   a real weakness, noted below.
+4. Copy the connection string, and **put the database name in it**:
+   `mongodb+srv://<user>:<pass>@<cluster>.mongodb.net/chronos`. With a bare `/` before the `?`,
+   Spring fails at startup with `Database name must not be empty`.
 
-**This was tried first, and the TLS handshake fails specifically from Fly's network.** The
-symptom: `javax.net.ssl.SSLException: (internal_error) Received fatal alert: internal_error` from
-the JVM driver against all three Atlas shard hosts. Forcing TLSv1.2 client-side did not fix it —
-identical alert. The isolating test: the exact same `openssl s_client -tls1_2` handshake against
-the exact same shard IP, from the exact same client, **succeeds outside Fly's network** (full
-certificate chain validates) and **fails identically to the JVM from inside a Fly machine**
-(`tlsv1 alert internal error`, alert number 80) — same IP, same port, same TLS version, only the
-network path differs. That isolates the fault to Atlas's edge rejecting the handshake based on
-source IP/network reputation, not a JVM/driver/cert/credentials problem. No JVM flag fixes a
-server-side rejection. If you hit this and want to keep using Atlas, the options are contacting
-Atlas support about the specific egress range, or trying a different Fly region — untested here,
-since Option B turned out to be the more direct fix.
+Untested end-to-end on Fly, since the billing wall below stopped the run before the access list was
+understood. Nothing is known to be wrong with it.
 
-## Option B: self-hosted Mongo on a second Fly Machine (recommended, not yet completed)
+## Option B: self-hosted Mongo on a second Fly Machine
 
-Skips the public internet — and Atlas's edge — entirely by running MongoDB on Fly's private `6PN`
-network, reachable only from other apps in the same org. A single-node replica set satisfies
-`w:majority` the same way Testcontainers and docker-compose already do here, so nothing about the
-app's write-concern story changes.
+**This was built to work around a problem that did not exist** (see above). It is still a legitimate
+architecture — running MongoDB on Fly's private `6PN` network means the database has no public
+listener at all, which is strictly better than Atlas M0's `0.0.0.0/0`-or-nothing. But it was reached
+by bad reasoning, and it is more moving parts than a demo needs. A single-node replica set satisfies
+`w:majority` the same way Testcontainers and docker-compose already do, so the write-concern story
+is unchanged.
 
 ```bash
 flyctl apps create chronos-mongo-<yoursuffix>
