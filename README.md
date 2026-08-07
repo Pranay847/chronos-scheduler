@@ -4,7 +4,7 @@ A distributed job and webhook scheduler. Multiple identical workers deliver HTTP
 precise time with at-least-once guarantees, lease-based crash recovery, exponential backoff and a
 replayable dead-letter queue.
 
-**Java 21 · Spring Boot 4.1 · MongoDB 7 · Docker · Prometheus + Grafana**
+**Java 21 · Spring Boot 4.1 · MongoDB 7 · Docker · Kubernetes · Prometheus + Grafana**
 
 ```bash
 docker compose up -d --build --scale worker=3
@@ -31,6 +31,8 @@ does not demonstrate.
 |---|---|
 | **p99 scheduling drift** | **236 ms** (p50 106 ms) across 3 workers |
 | **Job loss under chaos** | **zero** — 2 of 5 workers SIGKILLed mid-run, 4,000 jobs |
+| **On Kubernetes** | **zero loss** again, pods SIGKILLed and rescheduled by the ReplicaSet controller |
+| **Autoscaling** | 2 → 10 replicas on **queue depth**, not CPU — 40,000-job backlog |
 | **Duplicate rate** | **0.05%**, every one carrying a stable idempotency key |
 | **Claim query** | **1.2 ms** at 200K jobs — 99.2% faster than a naive index |
 | **Creation throughput** | ~24,000 jobs/min, 0 failures, p95 72 ms |
@@ -217,11 +219,6 @@ The demo stack sets `allow-private-targets=true` and `require-api-key=false` —
 a compose network is RFC 1918 private, which is exactly what the SSRF guard blocks. **Both default
 to the secure value and must stay there in a real deployment.**
 
-**[k8s/](k8s/)** — the crash-recovery test again, but Kubernetes deletes the pods and the ReplicaSet
-controller does the recovery. Zero loss both ways; **5 duplicates under SIGKILL versus 0 under
-SIGTERM**, which is graceful shutdown measured rather than asserted. Also: three probes rather than
-one, and why putting the database in a liveness probe kills a healthy fleet.
-
 Deploying it somewhere:
 
 - **[docs/RENDER_DEPLOY.md](docs/RENDER_DEPLOY.md)** — free, no card, one Blueprint click. Note the
@@ -235,6 +232,89 @@ Deploying it somewhere:
 
 ---
 
+## On Kubernetes
+
+The chaos test above kills containers and restarts them from a bash script. **[k8s/](k8s/)** runs the
+same 4,000-job test on a cluster, where pods are deleted and the ReplicaSet controller does the
+recovery — nothing in the recovery path belongs to the harness.
+
+```bash
+docker build -t chronos-scheduler:local .
+kind create cluster --name chronos && kind load docker-image chronos-scheduler:local --name chronos
+kubectl apply -f k8s/00-namespace.yaml -f k8s/10-mongo.yaml -f k8s/11-mongo-init.yaml
+kubectl apply -f k8s/40-sink.yaml -f k8s/20-worker.yaml -f k8s/30-scaling.yaml
+
+./k8s/chaos-k8s.sh 4000 40 2 kill      # SIGKILL — the crash case
+./k8s/chaos-k8s.sh 4000 40 2 evict     # SIGTERM — the rolling-deploy case
+./k8s/hpa-demo.sh                      # 40,000-job backlog, watch it scale
+```
+
+### Killing pods two ways gives different answers
+
+| | `kill` — SIGKILL, `--grace-period=0 --force` | `evict` — SIGTERM, plain `delete pod` |
+|---|---|---|
+| Distinct keys delivered | **4000 / 4000** | **4000 / 4000** |
+| **Duplicate keys** | **5** | **0** |
+| Execution records written | 3998 | 4000 |
+
+Same cluster, same command, same job count. The only difference is whether `@PreDestroy` ran — so
+that duplicate column is graceful shutdown measured rather than asserted.
+
+It also means **`kubectl delete pod` is not a crash test.** It sends SIGTERM and waits for the drain,
+which exercises the rolling-deploy path. Reporting that as "survived worker death" tests the wrong
+thing; the crash case needs `--grace-period=0 --force`.
+
+The third row is the one worth staring at. Under SIGKILL, Chronos wrote **3,998 execution records
+for 4,005 actual deliveries** — seven deliveries genuinely happened that the system has no record of,
+because pods died between the HTTP call returning and the record being written. Assertions run
+against the *receiver's* journal for exactly this reason; counting our own bookkeeping would have
+reported loss that did not occur.
+
+### Three probes, because one would kill the fleet
+
+| Probe | Endpoint | Mongo? | Answers |
+|---|---|---|---|
+| `startupProbe` | `/actuator/health/liveness` | no | "still booting, don't judge me yet" |
+| `livenessProbe` | `/actuator/health/liveness` | **no** | "restart me" |
+| `readinessProbe` | `/actuator/health/readiness` | **yes** | "send me traffic" |
+
+Boot's aggregate `/actuator/health` includes Mongo. Point a liveness probe at it and one database
+blip fails every replica simultaneously, Kubernetes kills the whole fleet, and each replacement fails
+the identical probe against the identical unavailable database — a restart storm produced by the
+health check rather than the fault. That is not hypothetical; it took the Render deployment of this
+project down for fifteen minutes while the app itself was serving fine.
+
+Readiness *should* include Mongo: a worker that cannot reach the database should leave the Service.
+It does not get restarted, and the poller keeps retrying, so it rejoins on its own.
+
+### Autoscaling on backlog, not CPU
+
+```
+TIME   HPA READING   REPLICAS
+0s     0             2
+26s    17376500m     2      ← 40,000 overdue jobs seeded
+38s    17376500m     6      ← scaled
+55s    3344400m      10     ← at maxReplicas, draining
+```
+
+CPU is the obvious signal and the wrong one — a worker polling every 200ms and dispatching on virtual
+threads sits parked on network I/O, so throughput climbs while utilisation stays flat. The HPA scales
+on `scheduler_jobs_due_depth` (jobs already late) via Prometheus + prometheus-adapter. No
+metrics-server needed; the only metric is external.
+
+**Two ways to get it wrong, neither of which errors.** Every worker exports the *fleet-wide* depth
+tagged with its own worker id — not a per-pod value. `sum()` in the adapter reports `depth × replicas`,
+so adding a worker to drain a backlog makes the metric go *up*, which adds workers: a loop that pins
+the deployment at `maxReplicas`. And `type: Pods` in the HPA averages before dividing, giving
+`currentReplicas × depth / target`, which over-scales by the replica count and compounds. Use `max()`
+and `type: External` with `AverageValue`.
+
+**[k8s/README.md](k8s/README.md)** has the rest — including a measured finding that the node's wall
+clock steps backwards 43–81ms every 30 seconds, which made an assertion fail in a way the code makes
+structurally impossible, and two bugs in the test harness itself.
+
+---
+
 ## What this doesn't do
 
 - **Exactly-once delivery.** Impossible over an unreliable network; see
@@ -244,3 +324,10 @@ Deploying it somewhere:
 - **`POST /v1/tenants` is unauthenticated.** A bootstrap compromise; real deployments put it behind
   an admin credential or an internal-only network.
 - **Sharding.** Single replica set. Scaling past it means sharding by `tenantId`.
+- **Autoscale the database.** Every replica claims against one MongoDB replica set with a single
+  atomic `findAndModify`. Past some worker count, more replicas mean more contention on the same
+  document range rather than more throughput — so the HPA's `maxReplicas` is a real ceiling, and the
+  right value depends on hardware not measured here.
+- **React to short spikes.** Queue depth counts jobs *already* late, and the control loop adds
+  ~20–30s (gauge refresh + scrape + HPA sync) before a backlog is even visible, plus 40–70s of pod
+  startup. Good for load lasting minutes; blind to a ten-second burst.
