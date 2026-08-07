@@ -65,6 +65,47 @@ by construction, and no monotonic clock fixes it, because "is 03:58:17.583 in th
 wall-clock question. The real mitigation is sourcing the due-check from the database's clock so
 every worker shares one time source.
 
+### Autoscaling on backlog, not CPU
+
+```
+TIME   DEPTH    HPA READING   REPLICAS
+0s     0        0             2
+26s    17376    17376500m     2      <- backlog registered
+38s    17376    17376500m     6      <- scaled
+~2m    3470     3470500m      10     <- at maxReplicas, draining
+```
+
+40,000 overdue jobs seeded against 2 replicas; the HPA scaled to 10 on queue depth alone. Reproduce
+with `./k8s/hpa-demo.sh`. There is no metrics-server in this cluster — dropping the CPU metric
+removed that dependency, since the only metric is external and served by prometheus-adapter.
+
+**Two ways to get this wrong, both silent.** Every worker exports the *fleet-wide* depth tagged with
+its own worker id; it is not a per-pod value that happens to carry a pod label.
+
+- `sum()` in the adapter reports `depth × replicas`. Adding a worker to drain a backlog makes the
+  metric go **up**, which adds workers, which makes it go up again — a feedback loop that pins the
+  deployment at `maxReplicas` while every dashboard shows more queued jobs than exist. Use `max()`.
+- `type: Pods` in the HPA averages across pods before dividing. Since every pod reports the same
+  number, the average *is* the depth, giving `currentReplicas × depth / target` — over-scaling by a
+  factor of the current replica count, compounding on each scale-up. Use `type: External` with
+  `AverageValue`, which gives `ceil(depth / target)`.
+
+Neither produces an error. Both produce confident, wrong autoscaling.
+
+### Debugging note: the discovery endpoint is not the contract
+
+`kubectl get --raw /apis/external.metrics.k8s.io/v1beta1` returns `NotFound` even when everything
+works — external metrics are unbounded and resolved on demand rather than enumerated. Time was lost
+concluding from that endpoint that discovery had failed while the HPA could have answered the
+question immediately:
+
+```bash
+kubectl describe hpa -n chronos chronos-worker    # ScalingActive / ValidMetricFound is the truth
+```
+
+One real bug did surface on the way: `max(...)` without `by (<<.GroupBy>>)` collapses the
+`namespace` label, leaving the adapter nothing to key the result on.
+
 ### Two harness bugs, both found by numbers not adding up
 
 Worth recording because both produced *confident wrong conclusions* rather than obvious failures.
@@ -206,12 +247,16 @@ claim.
 - **Single-node MongoDB.** `w:majority` on a one-member replica set is majority-of-one, which is a
   much weaker guarantee than a real three-member set. The write concern is genuinely configured and
   genuinely enforced; the durability it buys here is not production durability.
-- **The HPA scales on CPU, and CPU is the wrong signal.** A worker polling every 200ms and
-  dispatching on virtual threads spends most of its time parked on network I/O. Throughput can climb
-  while CPU stays flat. The metric that actually tracks saturation is `jobs.due.depth` — overdue and
-  unclaimed — which needs prometheus-adapter to expose as a custom metric. That is not done here.
-  The HPA is wired correctly; whether it fires on the right thing is a separate question with an
-  unflattering answer. It also needs metrics-server, without which the target reads `<unknown>`.
+- **The HPA scales on queue depth, but depth is a lagging signal.** `scheduler_jobs_due_depth`
+  counts jobs that are *already* late — by the time it rises, drift has happened. It is the right
+  thing to scale on because it is unambiguous, not because it is early. Combined with the control
+  loop's own latency (10s gauge refresh + 5s scrape + 15s HPA sync ≈ 20–30s before a backlog is
+  visible, plus 40–70s of pod startup), this reacts to load lasting minutes and is blind to a
+  ten-second spike.
+- **Adding workers does not scale the database.** Every replica claims against one MongoDB replica
+  set with a single atomic `findAndModify`. Past some worker count, more replicas mean more
+  contention on the same document range rather than more throughput. `maxReplicas` is a real limit
+  whose right value depends on hardware not measured here.
 - **The PDB only covers voluntary disruption.** Drains and upgrades respect it. A SIGKILLed pod, an
   OOM kill, or a dead node is not an eviction and the PDB has no say — that case is the application's
   lease recovery, which is what the chaos test exercises. Complementary, not redundant.

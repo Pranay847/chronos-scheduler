@@ -35,12 +35,33 @@ spec:
   minReplicas: 2
   maxReplicas: 10
   metrics:
-    - type: Resource
-      resource:
-        name: cpu
+    # Scales on backlog, not CPU. `scheduler_jobs_due_depth` is the count of jobs whose scheduled
+    # time has passed and which no worker has claimed -- work that is already late. That is the
+    # thing another worker actually fixes.
+    #
+    # CPU was the obvious choice and the wrong one. A worker polls every 200ms and dispatches on
+    # virtual threads, so under a delivery-heavy load it is parked on network I/O rather than
+    # burning CPU: throughput can climb while utilisation stays flat, and the autoscaler never
+    # fires during precisely the overload it exists to handle. Where CPU does move it tends to
+    # track JSON serialisation on the API path, which is unrelated to whether jobs are firing late.
+    #
+    # `type: External` with `AverageValue` gives the semantics wanted here:
+    #     desiredReplicas = ceil(depth / averageValue)
+    # so averageValue reads as "overdue jobs one worker should be responsible for". 200 overdue with
+    # a target of 100 means 2 replicas; 1000 means 10.
+    #
+    # NOT `type: Pods`. That averages the metric across pods before dividing, and since every worker
+    # exports the same fleet-wide depth the average is just the depth again -- giving
+    # `currentReplicas * depth / target`, which over-scales by a factor of the current replica count
+    # and gets worse every time it scales. The aggregation trap in the adapter config has a matching
+    # trap here, and both have to be right.
+    - type: External
+      external:
+        metric:
+          name: chronos_jobs_due_depth
         target:
-          type: Utilization
-          averageUtilization: 70
+          type: AverageValue
+          averageValue: "150"
   behavior:
     scaleDown:
       # Scaling in drops a worker holding leases. Those jobs are recovered -- graceful shutdown
@@ -51,20 +72,23 @@ spec:
       stabilizationWindowSeconds: 30
 
 # ---------------------------------------------------------------------------------------------
-# HONEST CAVEAT, because a screenshot of replicas going 3 -> 6 is easy to produce and easy to
-# misrepresent.
+# WHAT THIS DOES AND DOES NOT DEMONSTRATE.
 #
-# CPU is a poor scaling signal for this workload. A Chronos worker polls every 200ms and dispatches
-# on virtual threads; under a delivery-heavy load most of its time is spent parked on network I/O,
-# not burning CPU. Throughput can rise substantially while CPU stays flat, so the HPA may not fire
-# at all -- and if it does fire it is probably reflecting JSON serialisation on the API path rather
-# than scheduling work.
+# It scales on queue depth, which is the correct signal, and it needs no metrics-server: the only
+# metric here is external, served by prometheus-adapter (k8s/51-prometheus-adapter.yaml) out of
+# Prometheus (k8s/50-prometheus.yaml). Dropping the CPU metric dropped that dependency with it.
 #
-# The metric that actually tracks saturation here is `jobs.due.depth` -- how many jobs are overdue
-# and unclaimed. That is the queue backing up, which is the real reason to add a worker. Scaling on
-# it requires prometheus-adapter to expose it as a custom metric, which is a genuine piece of work
-# and is not done here.
+# What it still cannot do is scale the database. Adding workers adds contention on one MongoDB
+# replica set, and the claim is a single atomic findAndModify against one collection. Past some
+# number of workers, more replicas mean more contention on the same document range rather than more
+# throughput -- so maxReplicas is a real limit, not a formality, and the right value depends on
+# hardware nobody here has measured.
 #
-# So: this HPA is wired correctly and will scale on CPU. Whether CPU is the right trigger for a
-# scheduler is a separate question, and the answer is "not really". Claim the former, not the latter.
-# The HPA also requires metrics-server; without it the target reads <unknown> and nothing scales.
+# Nor is queue depth a leading indicator. `scheduler_jobs_due_depth` counts jobs that are ALREADY
+# late; by the time it rises, drift has happened. It is the right thing to scale on because it is
+# unambiguous, not because it is early. A predictive signal would look at scheduled arrival rate
+# ahead of now -- more useful and much easier to get wrong.
+#
+# The 10s gauge refresh and 5s scrape put roughly 10-20s of lag between a backlog forming and the
+# HPA seeing it, on top of the HPA's own 15s sync. Fine for load that persists for minutes;
+# invisible to a two-second spike.

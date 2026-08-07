@@ -1,0 +1,146 @@
+# Prometheus, in-cluster, scraping the workers.
+#
+# Only here to feed prometheus-adapter, which turns `scheduler_jobs_due_depth` into a metric the
+# HorizontalPodAutoscaler can read. The docker-compose stack already runs Prometheus + Grafana for
+# dashboards; this is the autoscaling data path, deliberately minimal -- 5s retention concerns and
+# alerting rules are not the point.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: chronos
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: chronos-prometheus
+rules:
+  # Service discovery only. Prometheus needs to find pods to scrape; it needs nothing else.
+  - apiGroups: [""]
+    resources: ["pods", "services", "endpoints", "nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: chronos-prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: chronos-prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: chronos
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: chronos
+data:
+  prometheus.yml: |
+    global:
+      # Faster than the usual 15s because this feeds an autoscaler. The gauge itself only refreshes
+      # every 10s inside the app (chronos.due-depth-refresh-ms), so scraping faster than that buys
+      # nothing -- 5s keeps scrape lag well under the refresh interval without hammering anything.
+      scrape_interval: 5s
+      evaluation_interval: 15s
+
+    scrape_configs:
+      - job_name: chronos-workers
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [chronos]
+        relabel_configs:
+          # Honour the prometheus.io/* annotations already on the worker pod template, so adding a
+          # scrapeable component means annotating it rather than editing this file.
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            target_label: __address__
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+          # namespace and pod are not decoration: prometheus-adapter's externalRules associate a
+          # series with a namespace, and without this label the metric is invisible to the HPA.
+          - source_labels: [__meta_kubernetes_namespace]
+            action: replace
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: pod
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: chronos
+  labels: { app: prometheus }
+spec:
+  type: ClusterIP
+  selector: { app: prometheus }
+  ports:
+    - name: http
+      port: 9090
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: chronos
+  labels: { app: prometheus }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: prometheus }
+  template:
+    metadata:
+      labels: { app: prometheus }
+    spec:
+      serviceAccountName: prometheus
+      containers:
+        - name: prometheus
+          image: quay.io/prometheus/prometheus:v2.55.1
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            # Short retention on purpose. Nothing here is a historical record -- the HPA reads the
+            # most recent sample and the dashboards live in the compose stack.
+            - --storage.tsdb.retention.time=1h
+            - --web.enable-lifecycle
+          ports:
+            - name: http
+              containerPort: 9090
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+            - name: data
+              mountPath: /prometheus
+          readinessProbe:
+            httpGet: { path: /-/ready, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /-/healthy, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { memory: "512Mi" }
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+        - name: data
+          # emptyDir, not a PVC: an autoscaler cares about the last few samples, and losing an hour
+          # of scrape history on a restart costs nothing here.
+          emptyDir: {}

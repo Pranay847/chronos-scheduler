@@ -1,0 +1,216 @@
+# prometheus-adapter: makes a Prometheus series readable by the HorizontalPodAutoscaler.
+#
+# The HPA cannot query Prometheus. It reads three Kubernetes APIs -- metrics.k8s.io (CPU/memory,
+# served by metrics-server), custom.metrics.k8s.io, and external.metrics.k8s.io. This adapter
+# registers itself as the server for the last of those and answers by running a PromQL query.
+#
+# Registering `external.metrics.k8s.io` is why an APIService object appears below: it tells the
+# kube-apiserver to proxy that API group to this Deployment.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus-adapter
+  namespace: chronos
+---
+# Lets the adapter resolve the objects a metric is associated with.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: chronos-prometheus-adapter-resource-reader
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces", "pods", "services", "configmaps"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: chronos-prometheus-adapter-resource-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: chronos-prometheus-adapter-resource-reader
+subjects:
+  - kind: ServiceAccount
+    name: prometheus-adapter
+    namespace: chronos
+---
+# An extension API server must be able to authenticate and authorise the requests the kube-apiserver
+# proxies to it. These two bindings are what make that work; without them every HPA lookup fails
+# with an authentication error that says nothing about the cause.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: chronos-prometheus-adapter-auth-delegator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: prometheus-adapter
+    namespace: chronos
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: chronos-prometheus-adapter-auth-reader
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+  - kind: ServiceAccount
+    name: prometheus-adapter
+    namespace: chronos
+---
+# Lets the HPA controller read the external metrics API.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: chronos-external-metrics-reader
+rules:
+  - apiGroups: ["external.metrics.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: chronos-external-metrics-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: chronos-external-metrics-reader
+subjects:
+  - kind: ServiceAccount
+    name: horizontal-pod-autoscaler
+    namespace: kube-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-adapter-config
+  namespace: chronos
+data:
+  config.yaml: |
+    externalRules:
+      - seriesQuery: '{__name__="scheduler_jobs_due_depth",namespace!=""}'
+        resources:
+          overrides:
+            namespace: {resource: "namespace"}
+        name:
+          matches: "^scheduler_jobs_due_depth$"
+          as: "chronos_jobs_due_depth"
+
+        # max(), NOT sum(). This is the whole correctness question for this metric.
+        #
+        # Every worker exports the SAME fleet-wide number -- the gauge counts PENDING-and-overdue
+        # rows across the entire collection, then tags the sample with the exporting worker's id.
+        # It is not a per-pod quantity that happens to be labelled per pod.
+        #
+        # So sum() would report depth x replicas. Adding a worker to drain a backlog would make the
+        # metric go UP, the HPA would add more workers, and the metric would go up again: a
+        # feedback loop that scales to maxReplicas and stays there, while every dashboard shows a
+        # queue depth several times larger than the number of jobs that exist.
+        #
+        # max() over an identical set is that value, and it is preferred to avg() because the
+        # gauges refresh independently every 10s -- during a backlog spike the most recently
+        # refreshed worker holds the truest number, and reacting to the worst view is the safer
+        # error for an autoscaler. The scaleDown stabilisation window handles the lag the other way.
+        #
+        # `by (<<.GroupBy>>)` is not optional. A bare max() collapses every label including
+        # `namespace`, and the adapter has nothing left to associate the result with -- it resolves
+        # to a value the HPA can never look up. With the grouping the result keeps
+        # {namespace="chronos"}, which is what the external metrics API is keyed on.
+        metricsQuery: 'max(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)'
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-adapter
+  namespace: chronos
+  labels: { app: prometheus-adapter }
+spec:
+  type: ClusterIP
+  selector: { app: prometheus-adapter }
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus-adapter
+  namespace: chronos
+  labels: { app: prometheus-adapter }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: prometheus-adapter }
+  template:
+    metadata:
+      labels: { app: prometheus-adapter }
+    spec:
+      serviceAccountName: prometheus-adapter
+      containers:
+        - name: prometheus-adapter
+          image: registry.k8s.io/prometheus-adapter/prometheus-adapter:v0.12.0
+          args:
+            - --prometheus-url=http://prometheus.chronos.svc:9090/
+            - --config=/etc/adapter/config.yaml
+            - --secure-port=6443
+            # The adapter self-signs into this directory at startup. Paired with
+            # insecureSkipTLSVerify on the APIService below, that avoids running a CA just to make
+            # a local demo work. A real cluster should issue a proper cert and drop both.
+            - --cert-dir=/tmp/cert
+            # Default is 10 MINUTES, and the failure it causes is quiet and confusing: the adapter
+            # discovers which series exist once at startup and then not again for ten minutes. Bring
+            # it up before Prometheus has completed a scrape -- which is exactly what happens when
+            # both are applied together -- and it discovers nothing, serves an empty metrics list,
+            # and the HPA reports the metric as not found. Everything looks healthy: the APIService
+            # is Available, the adapter answers 200, Prometheus has the data. It just has not looked
+            # again yet. One minute keeps that window short.
+            - --metrics-relist-interval=1m
+            - --v=4
+          ports:
+            - name: https
+              containerPort: 6443
+          volumeMounts:
+            - name: config
+              mountPath: /etc/adapter
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests: { cpu: "50m", memory: "128Mi" }
+            limits:   { memory: "256Mi" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-adapter-config
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1beta1.external.metrics.k8s.io
+spec:
+  service:
+    name: prometheus-adapter
+    namespace: chronos
+    port: 443
+  group: external.metrics.k8s.io
+  version: v1beta1
+  # See the --cert-dir note above. Acceptable for a local cluster, not for a real one.
+  insecureSkipTLSVerify: true
+  groupPriorityMinimum: 100
+  versionPriority: 100
