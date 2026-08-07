@@ -68,16 +68,34 @@ every worker shares one time source.
 ### Autoscaling on backlog, not CPU
 
 ```
-TIME   DEPTH    HPA READING   REPLICAS
-0s     0        0             2
-26s    17376    17376500m     2      <- backlog registered
-38s    17376    17376500m     6      <- scaled
-~2m    3470     3470500m      10     <- at maxReplicas, draining
+TIME   HPA READING   DESIRED  READY
+0s     0             2        2
+26s    17376500m     2        2     <- 40,000 overdue jobs seeded
+38s    17376500m     6        2     <- autoscaler reacts
+55s    3344400m      10       5     <- desired 10, five actually running
+199s   2956300m      10       0     <- whole fleet down
+336s   2663200m      10       0
 ```
 
-40,000 overdue jobs seeded against 2 replicas; the HPA scaled to 10 on queue depth alone. Reproduce
-with `./k8s/hpa-demo.sh`. There is no metrics-server in this cluster — dropping the CPU metric
-removed that dependency, since the only metric is external and served by prometheus-adapter.
+The autoscaler did its job: it read a real backlog and asked for more workers. **The cluster could
+not honour the request, and the outcome was worse than not scaling.** Ready replicas never exceeded
+6 and repeatedly hit zero; the backlog crawled from 32,773 to 26,000 in five and a half minutes,
+slower than the two replicas it started with.
+
+The arithmetic is unforgiving in hindsight. Ten workers at a 768Mi limit want 7.7GB on a node with
+7.6GB allocatable, already running MongoDB, Prometheus, the adapter and the sink. Under a 40,000-job
+backlog the JVMs grew toward those limits and the kernel started killing them; each kill dropped the
+worker's leases, which the reaper then had to recover, on a node already out of memory.
+
+So `maxReplicas: 10` was wrong for this cluster — **it is a statement about hardware, not an
+ambition**, and setting it above what the nodes can run means the autoscaler faithfully requests a
+fleet that thrashes. The honest ceiling on this single-node kind cluster is 4–5 workers. The value in
+the manifest is left at 10 with this note attached, because the failure is more instructive than a
+number tuned until the graph looked good.
+
+Reproduce with `./k8s/hpa-demo.sh`. Note there is no metrics-server in this cluster — dropping the
+CPU metric removed that dependency, since the only metric is external and served by
+prometheus-adapter.
 
 **Two ways to get this wrong, both silent.** Every worker exports the *fleet-wide* depth tagged with
 its own worker id; it is not a per-pod value that happens to carry a pod label.
@@ -118,6 +136,15 @@ Worth recording because both produced *confident wrong conclusions* rather than 
 2. **A vacuous piece of evidence.** While investigating the clock, a query sorted executions *by*
    `startedAt` and concluded from the ordered output that `startedAt` was monotonic — which sorting
    guarantees regardless. It proved nothing and briefly argued against the correct explanation.
+3. **A reported result taken from the first 55 seconds of a 13-minute run.** The autoscaling section
+   originally read "2 → 10 replicas" because the early samples showed desired climbing to 10. Ready
+   replicas never got there. Quoting the part of a trace that had finished, while the run was still
+   going, is the same error as the other two: reading a number without checking what it measured.
+
+And one gotcha with no bug attached: `bash` reads a script incrementally by byte offset, so editing
+`hpa-demo.sh` **while it was running** shifted everything after the cursor and the still-executing
+shell hit `syntax error near unexpected token 'done'`. The file on disk was fine the whole time.
+Worth knowing before debugging a script that was correct when you started.
 
 ---
 
