@@ -1,0 +1,155 @@
+# One image, one process, N identical replicas.
+#
+# There is deliberately no separate "API pod" and "worker pod". Every Chronos replica runs the REST
+# API, the poller, the dispatcher and the reaper in the same JVM, and coordination is one atomic
+# findAndModify against MongoDB. Splitting them into separate Deployments would invent a role
+# distinction the design does not have -- and would weaken the claim being made, which is that
+# scaling is `replicas: N` and nothing else. No leader election, no per-instance configuration,
+# no sharding of work between tiers.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chronos-config
+  namespace: chronos
+data:
+  # Full StatefulSet DNS, matching what 11-mongo-init.yaml wrote into the replica set config.
+  # replicaSet=rs0 makes the driver do topology discovery rather than talk to a single node.
+  SPRING_MONGODB_URI: "mongodb://chronos-mongo-0.chronos-mongo.chronos.svc.cluster.local:27017/chronos?replicaSet=rs0"
+
+  CHRONOS_POLL_INTERVAL_MS: "200"
+  CHRONOS_CHANGE_STREAM_ENABLED: "true"
+
+  # Container-aware heap sizing. Without this the JVM can size its heap from the node's total
+  # memory rather than the cgroup limit, then get OOM-killed by the kernel -- which produces no
+  # OutOfMemoryError and no stack trace, just a pod that vanishes and restarts.
+  JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=75"
+
+  # DEMO ONLY. Every pod IP in a cluster is RFC 1918 private, which is exactly what the SSRF guard
+  # blocks -- so with the guard at its production setting, deliveries to an in-cluster receiver are
+  # correctly refused. A real deployment sends to public customer endpoints and MUST leave this
+  # false. The app logs a loud warning at startup whenever it is true.
+  CHRONOS_SECURITY_ALLOW_PRIVATE_TARGETS: "true"
+  CHRONOS_SECURITY_REQUIRE_API_KEY: "false"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chronos-worker
+  namespace: chronos
+  labels: { app: chronos-worker }
+spec:
+  type: ClusterIP
+  selector: { app: chronos-worker }
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chronos-worker
+  namespace: chronos
+  labels: { app: chronos-worker }
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: chronos-worker }
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0    # never drop below the desired count during a deploy
+      maxSurge: 1
+  template:
+    metadata:
+      labels: { app: chronos-worker }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/actuator/prometheus"
+    spec:
+      # Must exceed the app's own graceful shutdown budget (spring.lifecycle.timeout-per-shutdown-
+      # phase=20s) or Kubernetes SIGKILLs mid-drain and strands claimed jobs for a full lease --
+      # converting every routine rolling deploy into the crash case.
+      terminationGracePeriodSeconds: 45
+
+      # Soft, not required: a single-node dev cluster cannot satisfy a hard spread and every pod
+      # would stay Pending. On a real multi-node cluster this spreads replicas across nodes so one
+      # node failure does not take the fleet.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels: { app: chronos-worker }
+
+      containers:
+        - name: chronos-worker
+          image: chronos-scheduler:local
+          # The image is built locally and loaded into the cluster, never pulled from a registry.
+          # Always would make every pod fail ImagePullBackOff against a registry that has no such tag.
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+
+          envFrom:
+            - configMapRef:
+                name: chronos-config
+
+          # ---- Probes -------------------------------------------------------------------------
+          # Three probes doing three different jobs. Collapsing them into one endpoint is the
+          # classic mistake and it is actively dangerous here.
+
+          # startupProbe: this app takes ~72s to boot on constrained CPU (measured on a 512MB free
+          # tier). Without this, livenessProbe starts counting during startup, fails, and kills the
+          # pod before it ever finishes booting -- a crash loop that looks like an application bug
+          # and is entirely self-inflicted. While a startupProbe is running the other two are
+          # suspended, so this buys 30 x 5s = 150s to come up without loosening steady-state checks.
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds: 5
+            failureThreshold: 30
+            timeoutSeconds: 3
+
+          # liveness: "restart me". Points at the liveness GROUP, which contains livenessState only
+          # -- no Mongo, no disk. If a shared dependency were in here, one database blip would fail
+          # this probe on all three replicas at once, Kubernetes would kill all three, and the
+          # replacements would fail the identical probe against the identical dependency. That is a
+          # restart storm manufactured by the health check. See application.properties.
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3
+
+          # readiness: "send me traffic". This one DOES include Mongo, because a worker that cannot
+          # reach the database cannot serve an API request. Failing readiness removes the pod from
+          # the Service; it does not restart it and does not stop the poller, so the pod rejoins on
+          # its own when Mongo returns -- no lost leases, no restart.
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3
+
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              # Memory is limited; CPU deliberately is not. A CPU limit is enforced by CFS
+              # throttling, which parks a runnable thread until the next 100ms quota period -- and
+              # this is a scheduler whose headline metric is p99 drift in the low hundreds of
+              # milliseconds. Throttling would show up directly in the number the project exists to
+              # report. The `requests` value still gives the scheduler what it needs for placement.
+              memory: "768Mi"
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false   # Spring writes temp files
+            capabilities:
+              drop: ["ALL"]

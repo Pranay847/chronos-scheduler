@@ -1,0 +1,84 @@
+# MongoDB as a StatefulSet, not a Deployment.
+#
+# The reason is stable network identity, and this project has a scar that explains why. On Fly.io
+# the database ran as a plain machine, `rs.initiate()` recorded the member under the container's
+# own hostname, and nothing outside that container could resolve it -- the driver discovered a
+# replica set member at an address it could never reach and timed out forever.
+#
+# A StatefulSet fixes that structurally rather than by convention. Pods get ordinal names that
+# survive rescheduling (chronos-mongo-0, always), and the headless Service below gives each one a
+# predictable DNS record. So the address written into the replica set config on day one is still
+# correct after the pod is deleted, rescheduled onto another node, or restarted a hundred times.
+# A Deployment's random pod suffix would invalidate it on the first restart.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chronos-mongo
+  namespace: chronos
+  labels: { app: chronos-mongo }
+spec:
+  # clusterIP: None makes this headless: DNS returns the pod IPs directly instead of a single
+  # virtual IP that load-balances. A replica set client must address individual members -- a
+  # load-balanced VIP would scatter a session across members and break the driver's topology view.
+  clusterIP: None
+  selector: { app: chronos-mongo }
+  ports:
+    - name: mongo
+      port: 27017
+      targetPort: 27017
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: chronos-mongo
+  namespace: chronos
+spec:
+  serviceName: chronos-mongo      # must match the headless Service for stable DNS
+  replicas: 1
+  selector:
+    matchLabels: { app: chronos-mongo }
+  template:
+    metadata:
+      labels: { app: chronos-mongo }
+    spec:
+      terminationGracePeriodSeconds: 20
+      containers:
+        - name: mongo
+          image: mongo:7
+          args: ["--replSet", "rs0", "--bind_ip_all"]
+          ports:
+            - name: mongo
+              containerPort: 27017
+          volumeMounts:
+            - name: data
+              mountPath: /data/db
+          # A command probe, not httpGet -- mongod speaks the wire protocol, not HTTP. `ping`
+          # requires no authorization, so this reports on the server rather than on credentials.
+          readinessProbe:
+            exec:
+              command: ["mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { memory: "512Mi" }
+  # volumeClaimTemplates, not an emptyDir: the PVC is bound to the ordinal and survives the pod.
+  # Deleting chronos-mongo-0 during the chaos test must not delete the jobs -- otherwise the test
+  # proves nothing, because "no jobs lost" is trivially true when there were no jobs to lose.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

@@ -1,0 +1,70 @@
+# Availability and scaling policy.
+#
+# The PDB is the one that earns its place immediately. The HPA is included because horizontal
+# scaling is a real property of this design, but read the honest caveat before claiming it works.
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: chronos-worker
+  namespace: chronos
+spec:
+  # Voluntary disruptions only -- node drains, cluster upgrades, `kubectl drain`. Without this a
+  # drain can evict all three replicas at once and the fleet goes to zero during routine
+  # maintenance. minAvailable: 2 means the eviction API refuses the third eviction until a
+  # replacement is Ready.
+  #
+  # This does NOT protect against involuntary disruption: a SIGKILLed pod, an OOM kill, or a node
+  # that dies is not an eviction and the PDB has no say. That case is covered by the application's
+  # lease recovery, which is what the chaos test exercises. The two mechanisms are complementary and
+  # neither replaces the other.
+  minAvailable: 2
+  selector:
+    matchLabels: { app: chronos-worker }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: chronos-worker
+  namespace: chronos
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: chronos-worker
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleDown:
+      # Scaling in drops a worker holding leases. Those jobs are recovered -- graceful shutdown
+      # hands back claims, and anything missed expires and is reaped -- but recovery is not free,
+      # so a five-minute window stops the HPA flapping replicas on brief dips.
+      stabilizationWindowSeconds: 300
+    scaleUp:
+      stabilizationWindowSeconds: 30
+
+# ---------------------------------------------------------------------------------------------
+# HONEST CAVEAT, because a screenshot of replicas going 3 -> 6 is easy to produce and easy to
+# misrepresent.
+#
+# CPU is a poor scaling signal for this workload. A Chronos worker polls every 200ms and dispatches
+# on virtual threads; under a delivery-heavy load most of its time is spent parked on network I/O,
+# not burning CPU. Throughput can rise substantially while CPU stays flat, so the HPA may not fire
+# at all -- and if it does fire it is probably reflecting JSON serialisation on the API path rather
+# than scheduling work.
+#
+# The metric that actually tracks saturation here is `jobs.due.depth` -- how many jobs are overdue
+# and unclaimed. That is the queue backing up, which is the real reason to add a worker. Scaling on
+# it requires prometheus-adapter to expose it as a custom metric, which is a genuine piece of work
+# and is not done here.
+#
+# So: this HPA is wired correctly and will scale on CPU. Whether CPU is the right trigger for a
+# scheduler is a separate question, and the answer is "not really". Claim the former, not the latter.
+# The HPA also requires metrics-server; without it the target reads <unknown> and nothing scales.

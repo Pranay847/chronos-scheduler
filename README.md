@@ -34,7 +34,7 @@ does not demonstrate.
 | **Duplicate rate** | **0.05%**, every one carrying a stable idempotency key |
 | **Claim query** | **1.2 ms** at 200K jobs — 99.2% faster than a naive index |
 | **Creation throughput** | ~24,000 jobs/min, 0 failures, p95 72 ms |
-| **Tests** | 169, including 1,000 jobs × 10 concurrent workers |
+| **Tests** | 172, including 1,000 jobs × 10 concurrent workers |
 
 Full numbers and how to reproduce them: **[BENCHMARKS.md](BENCHMARKS.md)** · **[CHAOS.md](CHAOS.md)**
 
@@ -201,7 +201,7 @@ pinning the connection to the validated IP with SNI configured. See
 
 ```bash
 docker compose up -d --build --scale worker=3   # full stack
-./gradlew test                                  # 169 tests (needs Docker for Testcontainers)
+./gradlew test                                  # 172 tests (needs Docker for Testcontainers)
 ./load/chaos.sh 4000 40 5 2                     # kill workers, assert no loss
 ./load/drift-compare.sh 300 2000                # change streams on vs off
 ```
@@ -216,6 +216,11 @@ docker compose up -d --build --scale worker=3   # full stack
 The demo stack sets `allow-private-targets=true` and `require-api-key=false` — every address inside
 a compose network is RFC 1918 private, which is exactly what the SSRF guard blocks. **Both default
 to the secure value and must stay there in a real deployment.**
+
+**[k8s/](k8s/)** — the crash-recovery test again, but Kubernetes deletes the pods and the ReplicaSet
+controller does the recovery. Zero loss both ways; **5 duplicates under SIGKILL versus 0 under
+SIGTERM**, which is graceful shutdown measured rather than asserted. Also: three probes rather than
+one, and why putting the database in a liveness probe kills a healthy fleet.
 
 Deploying it somewhere:
 

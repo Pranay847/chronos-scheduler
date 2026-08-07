@@ -93,3 +93,24 @@ the receiver can make it exactly-once on their side.**
 It also runs against a single-node replica set on one machine. A multi-node deployment adds failure
 modes this cannot exercise — primary elections in particular, which is why job state is written with
 `w:majority` (see `BENCHMARKS.md` for what that costs).
+
+---
+
+## Same test, run by Kubernetes instead of by this script
+
+Everything above kills containers and restarts them from the script. [`k8s/`](k8s/) runs the same
+4,000-job test on a real cluster, where pods are deleted and the ReplicaSet controller does the
+recovery — nothing in the recovery path is the harness.
+
+Two results there are worth reading even if you never touch the manifests:
+
+- **SIGKILL vs SIGTERM produce 5 duplicates vs 0.** `kubectl delete pod` sends SIGTERM and runs the
+  graceful drain, so it tests the rolling-deploy path, not a crash. The crash case needs
+  `--grace-period=0 --force`. Reporting the first as "survived worker death" tests the wrong thing.
+- **Under SIGKILL, Chronos wrote 3,998 execution records for 4,005 actual deliveries.** Seven
+  deliveries happened that the system has no record of. It is the clearest possible argument for
+  asserting against the receiver's journal rather than our own bookkeeping — the same reasoning
+  this document opens with, demonstrated numerically.
+
+There is also a measured finding about non-monotonic clocks, and two bugs in the harness itself.
+See [`k8s/README.md`](k8s/README.md).

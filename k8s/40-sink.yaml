@@ -1,0 +1,83 @@
+# Webhook receiver for the chaos test. TEST INFRASTRUCTURE, not part of the application.
+#
+# This exists because of a methodology point that decides whether the no-loss claim means anything.
+# Chronos writes its own execution records, and it would be far easier to count those. But those
+# records are written *after* a delivery returns -- so a worker SIGKILLed between the HTTP call and
+# the write produces a delivery with no record. Counting our own records therefore undercounts
+# exactly the deliveries the chaos test is trying to detect, in the direction that flatters the
+# result.
+#
+# The receiver's journal is the authority. It records what actually arrived, from outside the system
+# under test, and it cannot be affected by killing our pods.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chronos-sink-mappings
+  namespace: chronos
+data:
+  catch-all.json: |
+    {
+      "priority": 10,
+      "request": { "method": "ANY", "urlPattern": ".*" },
+      "response": {
+        "status": 200,
+        "body": "ok",
+        "headers": { "Content-Type": "text/plain" },
+        "fixedDelayMilliseconds": 15
+      }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chronos-sink
+  namespace: chronos
+  labels: { app: chronos-sink }
+spec:
+  type: ClusterIP
+  selector: { app: chronos-sink }
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chronos-sink
+  namespace: chronos
+  labels: { app: chronos-sink }
+spec:
+  # Exactly one. The journal is per-instance in-memory state, so a second replica would split the
+  # evidence across two journals and the count would silently come out low -- which for a no-loss
+  # test reads as data loss that never happened.
+  replicas: 1
+  selector:
+    matchLabels: { app: chronos-sink }
+  template:
+    metadata:
+      labels: { app: chronos-sink }
+    spec:
+      containers:
+        - name: wiremock
+          image: wiremock/wiremock:3.13.1
+          args: ["--max-request-journal-entries", "200000", "--disable-banner"]
+          ports:
+            - name: http
+              containerPort: 8080
+          volumeMounts:
+            - name: mappings
+              mountPath: /home/wiremock/mappings
+              readOnly: true
+          readinessProbe:
+            httpGet: { path: /__admin/health, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { memory: "512Mi" }
+      volumes:
+        - name: mappings
+          configMap:
+            name: chronos-sink-mappings

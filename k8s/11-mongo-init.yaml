@@ -1,0 +1,56 @@
+# Initiates the replica set exactly once.
+#
+# `w:majority` -- which every job-state write in Chronos uses -- requires a replica set. A bare
+# mongod rejects it, so this Job is not optional setup, it is what makes the correctness story
+# true in the cluster.
+#
+# The member is registered under its full StatefulSet DNS name rather than whatever hostname the
+# container happens to have. `rs.initiate()` with no argument would record the pod's short hostname,
+# which resolves inside that pod and nowhere else -- the workers would discover a member they cannot
+# reach. Naming it explicitly is the whole point of pairing a StatefulSet with a headless Service.
+#
+# Idempotent by design: re-running against an initiated set gets AlreadyInitialized and exits 0, so
+# `kubectl apply` twice is safe.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: chronos-mongo-init
+  namespace: chronos
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: init
+          image: mongo:7
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              HOST="chronos-mongo-0.chronos-mongo.chronos.svc.cluster.local:27017"
+
+              echo "waiting for mongod to answer..."
+              until mongosh --host "$HOST" --quiet --eval 'db.adminCommand("ping").ok' >/dev/null 2>&1; do
+                sleep 2
+              done
+
+              # Already initiated? Nothing to do. Checked rather than assumed so re-apply is safe.
+              if mongosh --host "$HOST" --quiet --eval 'rs.status().ok' >/dev/null 2>&1; then
+                echo "replica set already initiated"
+                exit 0
+              fi
+
+              echo "initiating rs0 with member $HOST"
+              mongosh --host "$HOST" --quiet --eval "
+                rs.initiate({
+                  _id: 'rs0',
+                  members: [{ _id: 0, host: '$HOST' }]
+                })
+              "
+
+              echo "waiting for PRIMARY..."
+              until mongosh --host "$HOST" --quiet --eval 'db.hello().isWritablePrimary' | grep -q true; do
+                sleep 2
+              done
+              echo "replica set is PRIMARY"
