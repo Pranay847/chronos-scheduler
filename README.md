@@ -32,7 +32,7 @@ does not demonstrate.
 | **p99 scheduling drift** | **236 ms** (p50 106 ms) across 3 workers |
 | **Job loss under chaos** | **zero** — 2 of 5 workers SIGKILLed mid-run, 4,000 jobs |
 | **On Kubernetes** | **zero loss** again, pods SIGKILLed and rescheduled by the ReplicaSet controller |
-| **Autoscaling** | HPA scales on **queue depth**, not CPU — and the run found a node too small to honour it |
+| **Autoscaling** | 2 → 5 workers on **queue depth**, not CPU — 40,000 backlog drained in 204s |
 | **Duplicate rate** | **0.05%**, every one carrying a stable idempotency key |
 | **Claim query** | **1.2 ms** at 200K jobs — 99.2% faster than a naive index |
 | **Creation throughput** | ~24,000 jobs/min, 0 failures, p95 72 ms |
@@ -294,27 +294,25 @@ threads sits parked on network I/O, so throughput climbs while utilisation stays
 on `scheduler_jobs_due_depth` (jobs already late) via Prometheus + prometheus-adapter. No
 metrics-server needed; the only metric is external.
 
-```
-TIME   HPA READING   DESIRED  READY
-0s     0             2        2
-26s    17376500m     2        2     ← 40,000 overdue jobs seeded
-38s    17376500m     6        2     ← autoscaler reacts
-55s    3344400m      10       5     ← desired 10, five actually running
-199s   2956300m      10       0     ← whole fleet down
-336s   2663200m      10       0
-```
+40,000 overdue jobs seeded against 2 replicas, on a single-node cluster with 7.6GB allocatable. The
+same run at two ceilings:
 
-**The autoscaler worked. The cluster could not honour it, and the result was worse than not scaling
-at all.** Desired went to `maxReplicas: 10`; ready never exceeded 6 and repeatedly hit zero. Ten
-workers at a 768Mi limit want 7.7GB on a 7.6GB node already running MongoDB, Prometheus, the adapter
-and the sink — so the JVMs grew into their limits under load and the kernel started killing them.
-The backlog crawled from 32,773 to 26,000 in five and a half minutes, far slower than the two
-replicas it started with.
+| | `maxReplicas: 10` | `maxReplicas: 5` |
+|---|---|---|
+| Ready replicas | peaked at 6, repeatedly **0** | **5, sustained** |
+| Backlog after ~3.5 min | still ~26,000 | **fully drained** |
+| Sustained throughput | ~20 jobs/sec | **~196 jobs/sec** |
 
-This is the failure mode the manifest's own comment predicted without measuring: **`maxReplicas` is
-a hardware statement, not an ambition.** Set it above what the nodes can actually run and the
-autoscaler faithfully requests a fleet that thrashes. On a single-node kind cluster of this size the
-honest ceiling is around 4–5 workers, not 10.
+**Asking for half as many workers made it roughly ten times faster.**
+
+At 10, ten workers at a 768Mi limit want 7.7GB on a 7.6GB node already running MongoDB, Prometheus,
+the adapter and the sink. The JVMs grew into their limits, the kernel killed them, and every kill
+dropped leases the reaper then had to recover — on a node already out of memory. The autoscaler was
+correct throughout; it read a real backlog and requested capacity that did not exist, and the request
+itself was what destroyed throughput.
+
+So **`maxReplicas` is a statement about hardware, not an ambition.** Set above what the nodes can
+run, a correct autoscaler makes things worse.
 
 **Two ways to get it wrong, neither of which errors.** Every worker exports the *fleet-wide* depth
 tagged with its own worker id — not a per-pod value. `sum()` in the adapter reports `depth × replicas`,

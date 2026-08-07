@@ -33,7 +33,21 @@ spec:
     kind: Deployment
     name: chronos-worker
   minReplicas: 2
-  maxReplicas: 10
+  # Five, not ten, and the difference was measured rather than guessed.
+  #
+  # At 10 the autoscaler worked perfectly and the cluster could not honour it. Ten workers at the
+  # 768Mi limit below want 7.7GB on a node with 7.6GB allocatable that is also running MongoDB,
+  # Prometheus, the adapter and the sink. Under a 40,000-job backlog the JVMs grew into their limits,
+  # the kernel killed them, and each kill dropped leases the reaper then had to recover on a node
+  # already out of memory. Ready replicas peaked at 6 and repeatedly hit zero; the backlog drained
+  # SLOWER than it had with the two replicas it started from.
+  #
+  # That is the failure worth internalising: maxReplicas is a statement about hardware, not an
+  # ambition. Set above what the nodes can actually run, the HPA faithfully requests a fleet that
+  # thrashes, and a correct autoscaler makes throughput worse. Raise this only alongside node
+  # capacity -- and remember the ceiling is the database too, since every replica claims against one
+  # replica set.
+  maxReplicas: 5
   metrics:
     # Scales on backlog, not CPU. `scheduler_jobs_due_depth` is the count of jobs whose scheduled
     # time has passed and which no worker has claimed -- work that is already late. That is the

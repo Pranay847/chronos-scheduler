@@ -71,9 +71,16 @@ for i in $(seq 1 60); do
   # mattered. Reading what the autoscaler actually saw is both cheaper and more honest -- a
   # separately-measured depth could disagree with the value driving the decision.
   #
-  # Kubernetes quantities come back in milli-units (17376500m = 17376.5), so strip the suffix.
-  DEPTH=$(printf '%s' "${TARGET:-}" | sed 's/m$//')
-  [ -n "$DEPTH" ] && DEPTH=$(( DEPTH / 1000 )) || DEPTH="?"
+  # Kubernetes renders quantities in one of two forms and the difference is not cosmetic:
+  # "17376500m" is milli-units (17376.5), while a whole number comes back bare as "19164" (19164).
+  # Dividing unconditionally by 1000 turned 19,164 queued jobs into "19" in this column -- the same
+  # class of error as everything else in this session, reading a number without checking its units.
+  # Only scale when the suffix is actually there.
+  case "${TARGET:-}" in
+    "")        DEPTH="?" ;;
+    *m)        DEPTH=$(( ${TARGET%m} / 1000 )) ;;
+    *)         DEPTH="$TARGET" ;;
+  esac
   DESIRED=$(kubectl get deploy -n "$NS" chronos-worker -o jsonpath='{.spec.replicas}' 2>/dev/null)
   READY=$(kubectl get deploy -n "$NS" chronos-worker -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
   [ "${DESIRED:-0}" -gt "$PEAK" ] 2>/dev/null && PEAK=$DESIRED
@@ -84,7 +91,11 @@ for i in $(seq 1 60); do
 done
 
 say "4. Result"
-echo "   peak replicas reached: $PEAK (started at 2, max allowed 10)"
+# Read the ceiling rather than hardcoding it -- the previous version printed "max allowed 10" after
+# the manifest had been changed to 5, which is a summary line quietly contradicting the run it summarises.
+MAXR=$(kubectl get hpa -n "$NS" chronos-worker -o jsonpath='{.spec.maxReplicas}' 2>/dev/null)
+MINR=$(kubectl get hpa -n "$NS" chronos-worker -o jsonpath='{.spec.minReplicas}' 2>/dev/null)
+echo "   peak replicas reached: $PEAK (started at ${MINR:-?}, max allowed ${MAXR:-?})"
 kubectl describe hpa -n "$NS" chronos-worker 2>&1 | sed -n '/Conditions:/,$p' | head -20 | tee "$OUT/hpa-describe.txt"
 
 if [ "$PEAK" -le 2 ]; then

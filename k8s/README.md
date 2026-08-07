@@ -67,35 +67,45 @@ every worker shares one time source.
 
 ### Autoscaling on backlog, not CPU
 
+40,000 overdue jobs seeded against 2 replicas, on a single-node kind cluster with 7.6GB allocatable.
+The same run at two different ceilings:
+
 ```
-TIME   HPA READING   DESIRED  READY
-0s     0             2        2
-26s    17376500m     2        2     <- 40,000 overdue jobs seeded
-38s    17376500m     6        2     <- autoscaler reacts
-55s    3344400m      10       5     <- desired 10, five actually running
-199s   2956300m      10       0     <- whole fleet down
-336s   2663200m      10       0
+maxReplicas: 10                        maxReplicas: 5
+TIME   DESIRED  READY  DEPTH           TIME   DESIRED  READY  DEPTH
+0s     2        2      0               1s     2        2      0
+38s    6        2      17376           13s    2        2      17241
+55s    10       5      3344            27s    5        2      19164
+199s   10       0      2956            97s    5        5      5991
+336s   10       0      26000           204s   5        5      0
 ```
 
-The autoscaler did its job: it read a real backlog and asked for more workers. **The cluster could
-not honour the request, and the outcome was worse than not scaling.** Ready replicas never exceeded
-6 and repeatedly hit zero; the backlog crawled from 32,773 to 26,000 in five and a half minutes,
-slower than the two replicas it started with.
+| | `maxReplicas: 10` | `maxReplicas: 5` |
+|---|---|---|
+| Ready replicas | peaked at 6, repeatedly **0** | **5, sustained** |
+| Backlog after ~3.5 min | still ~26,000 | **fully drained** |
+| Sustained throughput | ~20 jobs/sec | **~196 jobs/sec** |
 
-The arithmetic is unforgiving in hindsight. Ten workers at a 768Mi limit want 7.7GB on a node with
-7.6GB allocatable, already running MongoDB, Prometheus, the adapter and the sink. Under a 40,000-job
-backlog the JVMs grew toward those limits and the kernel started killing them; each kill dropped the
-worker's leases, which the reaper then had to recover, on a node already out of memory.
+**Asking for half as many workers made it roughly ten times faster.** That is the finding worth
+keeping, and it is not intuitive.
 
-So `maxReplicas: 10` was wrong for this cluster — **it is a statement about hardware, not an
-ambition**, and setting it above what the nodes can run means the autoscaler faithfully requests a
-fleet that thrashes. The honest ceiling on this single-node kind cluster is 4–5 workers. The value in
-the manifest is left at 10 with this note attached, because the failure is more instructive than a
-number tuned until the graph looked good.
+The arithmetic explains it. Ten workers at a 768Mi limit want 7.7GB on a node with 7.6GB
+allocatable, already running MongoDB, Prometheus, the adapter and the sink. Under load the JVMs grew
+into their limits, the kernel killed them, and every kill dropped leases the reaper then had to
+recover — on a node already out of memory. The autoscaler was behaving correctly the whole time; it
+read a real backlog and requested capacity that did not exist, and the request itself was what
+destroyed throughput.
+
+So **`maxReplicas` is a statement about hardware, not an ambition.** Set above what the nodes can
+actually run, a correct autoscaler makes things worse. The value here is 5 because that is what this
+node sustains — raise it only alongside node capacity, and remember the database is a second ceiling
+regardless, since every replica claims against one replica set.
 
 Reproduce with `./k8s/hpa-demo.sh`. Note there is no metrics-server in this cluster — dropping the
 CPU metric removed that dependency, since the only metric is external and served by
-prometheus-adapter.
+prometheus-adapter. Expect a burst of `FailedGetExternalMetric` warnings in the HPA's events for the
+first minute or so after a fresh deploy: prometheus-adapter has to complete a discovery pass before
+it can answer, and the HPA asks before it is ready. It resolves itself.
 
 **Two ways to get this wrong, both silent.** Every worker exports the *fleet-wide* depth tagged with
 its own worker id; it is not a per-pod value that happens to carry a pod label.
@@ -140,6 +150,14 @@ Worth recording because both produced *confident wrong conclusions* rather than 
    originally read "2 → 10 replicas" because the early samples showed desired climbing to 10. Ready
    replicas never got there. Quoting the part of a trace that had finished, while the run was still
    going, is the same error as the other two: reading a number without checking what it measured.
+4. **Dividing every quantity by 1000.** Kubernetes renders a metric as `17376500m` (milli-units) or,
+   when it happens to be whole, bare as `19164`. The demo script stripped an `m` that was not there
+   and divided anyway, printing 19,164 queued jobs as `19`. Same error again, in a fourth costume —
+   units this time rather than semantics.
+
+Four mistakes, one root cause: reading a number without establishing what it measured. The chaos and
+scaling results are trustworthy in spite of that process, not because of it, and the corrections are
+recorded here rather than quietly folded in.
 
 And one gotcha with no bug attached: `bash` reads a script incrementally by byte offset, so editing
 `hpa-demo.sh` **while it was running** shifted everything after the cursor and the still-executing
